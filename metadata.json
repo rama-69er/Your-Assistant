@@ -1,0 +1,6 @@
+{
+  "name": "Shimi",
+  "description": "A cute, privacy-first, voice-controlled AI companion and Android assistant.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
