@@ -466,14 +466,14 @@ export function routeCommandLocally(params: {
     /\b(send|write|compose|message|text)\b/i.test(lower) &&
     !/^(open|launch|start)\s+whatsapp[.!?]*$/i.test(lower)
   ) {
-    const colonMatch = cleaned.match(
-      /(?:send|message|text)\s+([a-zA-Z0-9\s'-]{2,28}?)\s*(?::|saying|that)\s*(.+)$/i
-    );
     const toMatch = cleaned.match(
       /\b(?:to|for)\s+([a-zA-Z0-9\s'-]{2,28}?)(?:\s+(?:saying|that|:|-)\s+(.+))?$/i
     );
-    const contact = (colonMatch?.[1] || toMatch?.[1] || 'your friend').trim();
-    const messageBody = (colonMatch?.[2] || toMatch?.[2] || 'Hi!').trim();
+    const colonMatch = cleaned.match(
+      /(?:send|message|text)\s+(?!(?:a\s+)?(?:message|text|whatsapp)\s+to\b)([a-zA-Z0-9\s'-]{2,28}?)\s*(?::|saying|that)\s*(.+)$/i
+    );
+    const contact = (toMatch?.[1] || colonMatch?.[1] || 'your friend').trim();
+    const messageBody = (toMatch?.[2] || colonMatch?.[2] || 'Hi!').trim();
     const appName = /\bwhatsapp\b/i.test(lower) ? 'WhatsApp' : 'Messages';
     return {
       matchedLocally: true,
@@ -806,7 +806,7 @@ export function routeCommandLocally(params: {
   // 21. Dynamic Open Any Installed App ("Open WhatsApp", "Open Instagram", "Open Chrome", "Open Spotify")
   const openAppMatch = cleaned.match(/^(?:open|launch|start)\s+([a-zA-Z0-9\s.+&-]{2,32})[.!?]*$/i);
   if (openAppMatch) {
-    const appName = openAppMatch[1].trim();
+    const appName = openAppMatch[1].replace(/[.!?]+$/, '').trim();
     return {
       matchedLocally: true,
       interpretation: {

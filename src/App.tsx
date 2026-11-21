@@ -15,12 +15,16 @@ import type {
   ActiveTab,
   AssistantPreferences,
   ConversationTurn,
+  DebugStage,
+  DebugTraceEntry,
+  NativeServiceSnapshot,
   PermissionKey,
   PermissionStatusMap,
   RobotState,
 } from './core/types';
 import { dispatchShimiAction } from './services/actionDispatcher';
 import { fetchServerHealth, interpretCommand } from './services/geminiService';
+import { nativeBridge } from './services/nativeBridge';
 import {
   INITIAL_PERMISSION_STATUS,
   inspectDevicePermissions,
@@ -54,6 +58,9 @@ export default function App() {
   const [tabHistory, setTabHistory] = useState<ActiveTab[]>(['dashboard']);
   const [permissions, setPermissions] = useState<PermissionStatusMap>(INITIAL_PERMISSION_STATUS);
   const [geminiServerConfigured, setGeminiServerConfigured] = useState(true);
+  const [nativeSnapshot, setNativeSnapshot] = useState<NativeServiceSnapshot>(() =>
+    nativeBridge.getSnapshot()
+  );
 
   // Ephemeral session state (never persisted across reloads)
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -70,6 +77,7 @@ export default function App() {
   const [cloudError, setCloudError] = useState<string | null>(null);
   const [conversation, setConversation] = useState<ConversationTurn[]>([]);
   const [actionLog, setActionLog] = useState<ActionExecutionRecord[]>([]);
+  const [debugTraces, setDebugTraces] = useState<DebugTraceEntry[]>([]);
 
   // Active interactive task modals
   const [cameraModal, setCameraModal] = useState<{ open: boolean; timerSeconds?: number }>({
@@ -88,15 +96,148 @@ export default function App() {
     voiceControllerRef.current = new VoiceAssistantController();
   }
 
-  // Inspect real browser permissions and server health on mount
-  useEffect(() => {
+  const pushDebugTrace = useCallback(
+    (
+      stage: DebugStage,
+      summary: string,
+      detail = '',
+      ok = true,
+      durationMs?: number
+    ) => {
+      const entry: DebugTraceEntry = {
+        id: `dbg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: Date.now(),
+        stage,
+        summary,
+        detail,
+        ok,
+        durationMs,
+      };
+      setDebugTraces((prev) => [entry, ...prev.slice(0, 39)]);
+    },
+    []
+  );
+
+  const syncWithNativeSnapshot = useCallback(() => {
+    const snap = nativeBridge.getSnapshot();
+    setNativeSnapshot(snap);
+    if (snap.connected) {
+      setIsSessionActive(snap.serviceRunning);
+      setIsListening(snap.listening);
+      setIsFloatingVisible(snap.overlayVisible);
+      setRobotState(snap.robotState);
+      if (snap.lastResponseText) {
+        setLatestBubble(snap.lastResponseText);
+      }
+    }
     inspectDevicePermissions().then(setPermissions);
+  }, []);
+
+  // Inspect real permissions, server health, and subscribe to native Android bridge events
+  useEffect(() => {
+    syncWithNativeSnapshot();
     fetchServerHealth().then((health) => setGeminiServerConfigured(health.geminiConfigured));
 
+    const unsubscribe = nativeBridge.subscribe((event) => {
+      const p = event.payload || {};
+      switch (event.type) {
+        case 'SERVICE_STATE_CHANGED': {
+          const snap = nativeBridge.getSnapshot();
+          setNativeSnapshot(snap);
+          if (snap.connected) {
+            setIsSessionActive(snap.serviceRunning);
+            setIsListening(snap.listening);
+            setRobotState(snap.robotState);
+          }
+          inspectDevicePermissions().then(setPermissions);
+          pushDebugTrace(
+            'BRIDGE',
+            snap.serviceRunning ? 'Native foreground service running' : 'Native service idle',
+            `Wake word active: ${snap.wakeWordActive ? 'yes' : 'no'} · Overlay: ${snap.overlayVisible ? 'visible' : 'hidden'}`,
+            true
+          );
+          break;
+        }
+        case 'WAKE_WORD_DETECTED': {
+          const word = String(p.wakeWord || preferences.wakeWord);
+          setRobotState('LISTENING');
+          setLatestBubble(`Heard "${word}" — listening for your command...`);
+          pushDebugTrace(
+            'WAKE_WORD',
+            `Wake word "${word}" detected on device`,
+            p.remainder ? `Inline command: "${String(p.remainder)}"` : 'Opened active listening window',
+            true
+          );
+          break;
+        }
+        case 'LISTENING_STARTED':
+          setIsListening(true);
+          setRobotState('LISTENING');
+          break;
+        case 'SPEECH_PARTIAL':
+          setInterimTranscript(String(p.transcript || ''));
+          break;
+        case 'SPEECH_FINAL': {
+          const transcript = String(p.transcript || '');
+          setIsListening(false);
+          setInterimTranscript('');
+          if (transcript) {
+            pushDebugTrace('SPEECH', `Native SpeechRecognizer: "${transcript}"`, '', true);
+          }
+          break;
+        }
+        case 'ACTION_COMPLETED': {
+          const spoken = String(p.spokenReply || p.message || '');
+          const nextState = (String(p.robotState || 'SUCCESS') as RobotState) || 'SUCCESS';
+          setIsListening(false);
+          if (spoken) setLatestBubble(spoken);
+          setRobotState(nextState);
+          pushDebugTrace(
+            'ANDROID_ACTION',
+            `${String(p.intent || 'ACTION')} -> ${String(p.status || 'executed')}`,
+            spoken,
+            p.ok !== false
+          );
+          break;
+        }
+        case 'ACTION_FAILED': {
+          const msg = String(p.message || 'Native action failed.');
+          setIsListening(false);
+          setLatestBubble(msg);
+          setRobotState('SORRY');
+          pushDebugTrace('ERROR', 'Native action failed', msg, false);
+          break;
+        }
+        case 'DEBUG_TRACE': {
+          const stage = (String(p.stage || 'BRIDGE') as DebugStage) || 'BRIDGE';
+          const ok = p.ok !== false && p.status !== 'error' && p.status !== 'warn';
+          pushDebugTrace(
+            stage,
+            String(p.summary || 'Native trace'),
+            String(p.detail || ''),
+            ok,
+            typeof p.durationMs === 'number' ? p.durationMs : undefined
+          );
+          break;
+        }
+        default:
+          break;
+      }
+    });
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncWithNativeSnapshot();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      unsubscribe();
+      document.removeEventListener('visibilitychange', handleVisibility);
       voiceControllerRef.current?.releaseAll();
     };
-  }, []);
+  }, [preferences.wakeWord, pushDebugTrace, syncWithNativeSnapshot]);
 
   // Keep document title aligned with custom assistant name
   useEffect(() => {
@@ -122,6 +263,7 @@ export default function App() {
     setPreferences((prev) => {
       const next = { ...prev, ...patch };
       savePreferences(next);
+      nativeBridge.syncPreferences(next);
       return next;
     });
   }, []);
@@ -153,7 +295,8 @@ export default function App() {
         text,
         personality: preferences.personality,
         mode: preferences.voiceOutputMode,
-        cloudGeminiEnabled: preferences.cloudGeminiEnabled,
+        cloudGeminiEnabled:
+          preferences.aiMode !== 'offline_only' && preferences.cloudGeminiEnabled,
         onSpeakingStart: () => {
           markActivity();
           setRobotState('SPEAKING');
@@ -164,7 +307,13 @@ export default function App() {
         },
       });
     },
-    [markActivity, preferences.cloudGeminiEnabled, preferences.personality, preferences.voiceOutputMode]
+    [
+      markActivity,
+      preferences.aiMode,
+      preferences.cloudGeminiEnabled,
+      preferences.personality,
+      preferences.voiceOutputMode,
+    ]
   );
 
   const handleCommand = useCallback(
@@ -178,6 +327,7 @@ export default function App() {
       setInterimTranscript('');
       setRobotState('THINKING');
       setLatestBubble('Thinking...');
+      pushDebugTrace('SPEECH', `Received command: "${utterance}"`, 'Entering offline-first router', true);
 
       const userTurn: ConversationTurn = {
         id: `usr_${Date.now()}`,
@@ -188,19 +338,35 @@ export default function App() {
       setConversation((prev) => [...prev.slice(-11), userTurn]);
 
       try {
-        const { interpretation, cloudError: errMsg } = await interpretCommand({
-          utterance,
-          assistantName: preferences.name,
-          personality: preferences.personality,
-          permissions,
-          cloudGeminiEnabled: preferences.cloudGeminiEnabled,
-          recentContext: [...conversation, userTurn],
-        });
+        const { interpretation, routedLocally, cloudError: errMsg, durationMs } =
+          await interpretCommand({
+            utterance,
+            assistantName: preferences.name,
+            wakeWord: preferences.wakeWord,
+            personality: preferences.personality,
+            permissions,
+            aiMode: preferences.aiMode,
+            cloudGeminiEnabled: preferences.cloudGeminiEnabled,
+            confirmConsequentialActions: preferences.confirmConsequentialActions,
+            recentContext: [...conversation, userTurn],
+          });
+
+        pushDebugTrace(
+          'INTENT',
+          `${interpretation.intent} (${interpretation.category})`,
+          routedLocally
+            ? 'Resolved locally offline (0 Gemini calls)'
+            : `Resolved via ${interpretation.source}`,
+          true,
+          durationMs
+        );
 
         if (errMsg) {
           setCloudError(errMsg);
+          pushDebugTrace('INTENT', 'Cloud Gemini fallback triggered', errMsg, false);
         }
 
+        const execStart = performance.now();
         const executionRecord = dispatchShimiAction(
           utterance,
           preferences.name,
@@ -223,6 +389,18 @@ export default function App() {
             onGoHome: () => navigateToTab('dashboard'),
           }
         );
+        const execMs = Math.round(performance.now() - execStart);
+
+        const isNativeExecutor =
+          executionRecord.executor === 'local_android_native' ||
+          executionRecord.executor === 'accessibility_native';
+        pushDebugTrace(
+          isNativeExecutor ? 'ANDROID_ACTION' : 'EXECUTOR',
+          `${executionRecord.intent} -> ${executionRecord.status}`,
+          executionRecord.detail || executionRecord.summary,
+          executionRecord.status === 'executed' || executionRecord.status === 'pending_confirmation',
+          execMs
+        );
 
         setActionLog((prev) => [executionRecord, ...prev.slice(0, 14)]);
 
@@ -234,25 +412,38 @@ export default function App() {
               ? 'CONFUSED'
               : interpretation.robotState;
 
+        const replyText =
+          executionRecord.status === 'unsupported_in_web' && executionRecord.detail
+            ? executionRecord.detail
+            : interpretation.spokenReply;
+
         const assistantTurn: ConversationTurn = {
           id: `ast_${Date.now()}`,
           role: 'assistant',
-          text: interpretation.spokenReply,
+          text: replyText,
           robotState: finalRobotState,
           intent: interpretation.intent,
           source: interpretation.source,
           timestamp: Date.now(),
         };
         setConversation((prev) => [...prev.slice(-11), assistantTurn]);
-        setLatestBubble(interpretation.spokenReply);
+        setLatestBubble(replyText);
         setRobotState(finalRobotState);
 
+        pushDebugTrace('RESULT', `Robot state: ${finalRobotState}`, replyText, true);
+
         setIsProcessing(false);
-        await speakResponse(interpretation.spokenReply, finalRobotState);
-      } catch {
+        await speakResponse(replyText, finalRobotState);
+      } catch (err) {
         setIsProcessing(false);
         setRobotState('SORRY');
         setLatestBubble('Something interrupted that command. Please try again.');
+        pushDebugTrace(
+          'ERROR',
+          'Command execution error',
+          err instanceof Error ? err.message : 'Unexpected failure',
+          false
+        );
       }
     },
     [
@@ -262,14 +453,22 @@ export default function App() {
       navigateBackTab,
       navigateToTab,
       permissions,
+      preferences.aiMode,
       preferences.cloudGeminiEnabled,
+      preferences.confirmConsequentialActions,
       preferences.name,
       preferences.personality,
+      preferences.wakeWord,
+      pushDebugTrace,
       speakResponse,
     ]
   );
 
   const startVoiceListening = useCallback(async () => {
+    if (nativeBridge.isNativeAvailable()) {
+      nativeBridge.startNativeListening();
+      return;
+    }
     if (!voiceControllerRef.current) return;
     markActivity();
     setIsPaused(false);
@@ -308,13 +507,23 @@ export default function App() {
     setIsPaused(false);
     setIsFloatingVisible(preferences.showFloatingOnStart);
     setRobotState('IDLE');
+    if (nativeBridge.isNativeAvailable()) {
+      nativeBridge.syncPreferences({ ...preferences, backgroundAssistantEnabled: true });
+      nativeBridge.setBackgroundAssistantEnabled(true);
+      syncWithNativeSnapshot();
+    }
     setLatestBubble(
       `Hi! ${preferences.name} is active. Tap Speak Now or type a command below.`
     );
-  }, [markActivity, preferences.name, preferences.showFloatingOnStart]);
+  }, [markActivity, preferences, syncWithNativeSnapshot]);
 
   const handleStopSession = useCallback(() => {
     voiceControllerRef.current?.releaseAll(setIsListening, setAudioLevel);
+    if (nativeBridge.isNativeAvailable()) {
+      nativeBridge.setBackgroundAssistantEnabled(false);
+      syncWithNativeSnapshot();
+    }
+    updatePreferences({ backgroundAssistantEnabled: false });
     setIsSessionActive(false);
     setIsPaused(false);
     setIsFloatingVisible(false);
@@ -323,9 +532,26 @@ export default function App() {
     setPhotoModal({ open: false, subject: '' });
     setRobotState('SLEEPING');
     setLatestBubble(
-      `${preferences.name} stopped. Microphone and active session resources have been released.`
+      `${preferences.name} stopped. Background listening, microphone, and overlay have been released.`
     );
-  }, [preferences.name]);
+  }, [preferences.name, syncWithNativeSnapshot, updatePreferences]);
+
+  const handleToggleBackgroundAssistant = useCallback(
+    (enabled: boolean) => {
+      updatePreferences({ backgroundAssistantEnabled: enabled });
+      if (enabled) {
+        if (nativeBridge.isNativeAvailable()) {
+          nativeBridge.syncPreferences({ ...preferences, backgroundAssistantEnabled: true });
+          nativeBridge.setBackgroundAssistantEnabled(true);
+          syncWithNativeSnapshot();
+        }
+        handleStartSession();
+      } else {
+        handleStopSession();
+      }
+    },
+    [handleStartSession, handleStopSession, preferences, syncWithNativeSnapshot, updatePreferences]
+  );
 
   const handleToggleListening = useCallback(() => {
     if (!isSessionActive) {
@@ -334,7 +560,11 @@ export default function App() {
       return;
     }
     if (isListening) {
-      voiceControllerRef.current?.stopListening(setIsListening, setAudioLevel);
+      if (nativeBridge.isNativeAvailable()) {
+        nativeBridge.stopNativeListening();
+      } else {
+        voiceControllerRef.current?.stopListening(setIsListening, setAudioLevel);
+      }
       setRobotState('IDLE');
       setLatestBubble('Microphone paused. Tap Speak Now whenever you are ready.');
     } else {
@@ -345,6 +575,9 @@ export default function App() {
   const handleTogglePause = useCallback(() => {
     if (!isPaused) {
       voiceControllerRef.current?.stopListening(setIsListening, setAudioLevel);
+      if (nativeBridge.isNativeAvailable()) {
+        nativeBridge.stopNativeListening();
+      }
       setIsPaused(true);
       setRobotState('SLEEPING');
       setLatestBubble(`${preferences.name} is paused. Microphone is off.`);
@@ -359,6 +592,9 @@ export default function App() {
   const handleConfirmAction = useCallback(
     (actionId: string) => {
       markActivity();
+      if (nativeBridge.isNativeAvailable()) {
+        nativeBridge.confirmAction(actionId);
+      }
       setActionLog((prev) =>
         prev.map((item) =>
           item.id === actionId
@@ -366,35 +602,42 @@ export default function App() {
                 ...item,
                 status: 'executed',
                 summary: item.summary.replace(/^Confirm\s+/i, 'Confirmed: '),
-                detail: 'Confirmed by you. Tap the button below to open the prepared app draft.',
+                detail: nativeBridge.isNativeAvailable()
+                  ? 'Confirmed by you and handed to Android.'
+                  : 'Confirmed by you. Tap the button below to open the prepared app draft.',
               }
             : item
         )
       );
+      pushDebugTrace('RESULT', 'User confirmed consequential action', actionId, true);
       setRobotState('SUCCESS');
-      setLatestBubble('Confirmed! Your draft link is ready to open.');
+      setLatestBubble('Confirmed! Proceeding with your action.');
     },
-    [markActivity]
+    [markActivity, pushDebugTrace]
   );
 
   const handleCancelAction = useCallback(
     (actionId: string) => {
       markActivity();
+      if (nativeBridge.isNativeAvailable()) {
+        nativeBridge.cancelAction(actionId);
+      }
       setActionLog((prev) =>
         prev.map((item) =>
           item.id === actionId
             ? {
                 ...item,
                 status: 'cancelled',
-                detail: 'Cancelled before sending anything.',
+                detail: 'Cancelled before sending or calling anything.',
               }
             : item
         )
       );
+      pushDebugTrace('RESULT', 'User cancelled consequential action', actionId, true);
       setRobotState('IDLE');
       setLatestBubble('Okay, I cancelled that action. Nothing was sent.');
     },
-    [markActivity]
+    [markActivity, pushDebugTrace]
   );
 
   const handleRequestPermission = useCallback(async (key: PermissionKey): Promise<string> => {
@@ -403,11 +646,31 @@ export default function App() {
     return result.message;
   }, []);
 
+  const handleOpenNativeSettings = useCallback((key: PermissionKey) => {
+    if (key === 'battery_optimization') {
+      nativeBridge.requestBatteryOptimizationExemption();
+      return;
+    }
+    const targetMap: Record<PermissionKey, 'general' | 'overlay' | 'accessibility' | 'notifications' | 'app_details'> = {
+      microphone: 'app_details',
+      camera: 'app_details',
+      photos: 'app_details',
+      contacts: 'app_details',
+      notifications: 'notifications',
+      overlay: 'overlay',
+      accessibility: 'accessibility',
+      notification_listener: 'notifications',
+      battery_optimization: 'general',
+    };
+    nativeBridge.openAndroidSetting(targetMap[key]);
+  }, []);
+
   const handleClearAllAndReset = useCallback(() => {
     handleStopSession();
     clearAllLocalPreferences();
     setConversation([]);
     setActionLog([]);
+    setDebugTraces([]);
     setCloudError(null);
     setPreferences({ ...DEFAULT_PREFERENCES });
     setActiveTab('dashboard');
@@ -420,10 +683,12 @@ export default function App() {
       <OnboardingView
         initialPreferences={preferences}
         onComplete={(nextPrefs) => {
-          savePreferences(nextPrefs);
-          setPreferences(nextPrefs);
+          const normalized = { ...nextPrefs, wakeWord: nextPrefs.wakeWord || nextPrefs.name };
+          savePreferences(normalized);
+          nativeBridge.syncPreferences(normalized);
+          setPreferences(normalized);
           setLatestBubble(
-            `Hi! I'm ${nextPrefs.name}. Tap Start ${nextPrefs.name} whenever you'd like help.`
+            `Hi! I'm ${normalized.name}. Tap Start ${normalized.name} whenever you'd like help.`
           );
         }}
       />
@@ -524,11 +789,16 @@ export default function App() {
             speechSupported={speechSupported}
             conversation={conversation}
             actionLog={actionLog}
+            nativeSnapshot={nativeSnapshot}
+            debugTraces={debugTraces}
+            onClearDebugTraces={() => setDebugTraces([])}
             onStartSession={handleStartSession}
             onStopSession={handleStopSession}
             onTogglePause={handleTogglePause}
             onToggleListening={handleToggleListening}
-            onShowFloating={() => setIsFloatingVisible(true)}
+            onShowFloating={() => {
+              setIsFloatingVisible(true);
+            }}
             onPreviewState={(st) => {
               markActivity();
               setRobotState(st);
@@ -549,10 +819,11 @@ export default function App() {
           <PermissionsView
             assistantName={preferences.name}
             permissions={permissions}
+            nativeConnected={nativeSnapshot.connected}
             onRequestPermission={handleRequestPermission}
+            onOpenNativeSettings={handleOpenNativeSettings}
             onRefreshPermissions={async () => {
-              const latest = await inspectDevicePermissions();
-              setPermissions(latest);
+              syncWithNativeSnapshot();
             }}
           />
         )}
@@ -561,9 +832,11 @@ export default function App() {
           <PrivacySettingsView
             preferences={preferences}
             permissions={permissions}
+            nativeSnapshot={nativeSnapshot}
             isSessionActive={isSessionActive}
             geminiServerConfigured={geminiServerConfigured}
             onUpdatePreferences={updatePreferences}
+            onToggleBackgroundAssistant={handleToggleBackgroundAssistant}
             onStopSession={handleStopSession}
             onClearAllAndReset={handleClearAllAndReset}
           />
@@ -605,7 +878,9 @@ export default function App() {
           latestBubble={latestBubble}
           onToggleListening={handleToggleListening}
           onTogglePause={handleTogglePause}
-          onHide={() => setIsFloatingVisible(false)}
+          onHide={() => {
+            setIsFloatingVisible(false);
+          }}
           onOpenMain={() => navigateToTab('dashboard')}
           onStopAssistant={handleStopSession}
         />
@@ -628,7 +903,9 @@ export default function App() {
       <PhotoPickerModal
         open={photoModal.open}
         initialSubject={photoModal.subject}
-        cloudGeminiEnabled={preferences.cloudGeminiEnabled}
+        cloudGeminiEnabled={
+          preferences.aiMode !== 'offline_only' && preferences.cloudGeminiEnabled
+        }
         onClose={() => setPhotoModal({ open: false, subject: '' })}
       />
 

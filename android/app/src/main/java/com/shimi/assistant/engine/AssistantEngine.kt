@@ -412,21 +412,28 @@ object AssistantEngine {
         config: AssistantConfig,
         permissions: Map<String, String>,
         serviceRunning: Boolean,
-        overlayVisible: Boolean
+        overlayVisible: Boolean,
+        accessibilityConnected: Boolean = false,
+        notificationListenerConnected: Boolean = false,
+        batteryOptimizationIgnored: Boolean = false
     ): JSONObject {
         val permsJson = JSONObject()
         permissions.forEach { (k, v) -> permsJson.put(k, v) }
         return JSONObject()
             .put("connected", true)
+            .put("androidSdkInt", android.os.Build.VERSION.SDK_INT)
             .put("serviceRunning", serviceRunning)
             .put("wakeWordActive", serviceRunning && config.wakeWordEnabled)
-            .put("isListening", isActiveListening)
+            .put("listening", isActiveListening)
+            .put("speaking", currentRobotState == RobotState.SPEAKING)
             .put("overlayVisible", overlayVisible)
+            .put("accessibilityConnected", accessibilityConnected)
+            .put("notificationListenerConnected", notificationListenerConnected)
+            .put("batteryOptimizationIgnored", batteryOptimizationIgnored)
             .put("robotState", currentRobotState.name)
-            .put("wakeWord", config.wakeWord)
-            .put("aiMode", config.aiMode)
-            .put("lastTranscript", lastTranscript)
-            .put("lastReply", lastReply)
+            .put("lastRecognizedText", lastTranscript)
+            .put("lastResponseText", lastReply)
             .put("permissions", permsJson)
+            .put("installedAppsCount", appLauncher?.listInstalledApps()?.size ?: 0)
     }
 }

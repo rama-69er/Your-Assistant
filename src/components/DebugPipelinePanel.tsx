@@ -19,13 +19,7 @@ const STAGE_LABEL: Record<DebugStage, string> = {
   ANDROID_ACTION: 'Android action',
   RESULT: 'Result',
   BRIDGE: 'Native bridge',
-};
-
-const STATUS_STYLE: Record<DebugTraceEntry['status'], string> = {
-  ok: 'text-emerald-700',
-  warn: 'text-amber-700',
-  error: 'text-rose-700',
-  info: 'text-slate-600',
+  ERROR: 'Error',
 };
 
 export const DebugPipelinePanel: React.FC<DebugPipelinePanelProps> = ({
@@ -108,8 +102,12 @@ export const DebugPipelinePanel: React.FC<DebugPipelinePanelProps> = ({
                           {entry.durationMs}ms
                         </span>
                       )}
-                      <span className={`text-[11px] font-semibold ${STATUS_STYLE[entry.status]}`}>
-                        {entry.status.toUpperCase()}
+                      <span
+                        className={`text-[11px] font-semibold ${
+                          entry.ok ? 'text-emerald-700' : 'text-amber-700'
+                        }`}
+                      >
+                        {entry.ok ? 'OK' : 'WARN'}
                       </span>
                     </div>
                   </div>

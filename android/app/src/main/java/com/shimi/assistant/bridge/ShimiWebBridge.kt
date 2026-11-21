@@ -14,7 +14,7 @@ import org.json.JSONObject
 
 /**
  * Bidirectional JS <-> Kotlin bridge exposed to the Shimi PWA as `window.ShimiNative`.
- * Pushes live Android service events back into the PWA via `window.__shimiReceiveNativeEvent(json)`.
+ * Method names and JSON keys match `ShimiAndroidJavascriptInterface` in `src/services/nativeBridge.ts` 1:1.
  */
 class ShimiWebBridge(
     private val webView: WebView,
@@ -26,52 +26,24 @@ class ShimiWebBridge(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
-    fun getServiceStateJson(): String {
+    fun getSnapshotJson(): String {
         val config = settingsRepository.load()
         val state = AssistantEngine.currentSnapshot(
             config = config,
             permissions = permissionManager.snapshotMap(),
             serviceRunning = backgroundServiceManager.isServiceRunning(),
-            overlayVisible = AssistantEngine.isOverlayVisible()
+            overlayVisible = AssistantEngine.isOverlayVisible(),
+            accessibilityConnected = permissionManager.hasAccessibility(),
+            notificationListenerConnected = permissionManager.hasNotificationListener(),
+            batteryOptimizationIgnored = permissionManager.isBatteryOptimizationIgnored()
         )
         return state.toString()
     }
 
     @JavascriptInterface
-    fun startBackgroundAssistant(configJson: String?): Boolean {
-        if (!configJson.isNullOrBlank()) {
-            syncPreferences(configJson)
-        }
-        settingsRepository.updateBackgroundEnabled(true)
-        val started = backgroundServiceManager.startService()
-        pushStateSnapshot()
-        return started
-    }
-
-    @JavascriptInterface
-    fun stopBackgroundAssistant(): Boolean {
-        settingsRepository.updateBackgroundEnabled(false)
-        backgroundServiceManager.stopService()
-        pushStateSnapshot()
-        return true
-    }
-
-    @JavascriptInterface
-    fun startVoiceCommand(): Boolean {
-        AssistantEngine.triggerManualListen()
-        return true
-    }
-
-    @JavascriptInterface
-    fun stopVoiceCommand(): Boolean {
-        AssistantEngine.stopListening()
-        return true
-    }
-
-    @JavascriptInterface
-    fun syncPreferences(configJson: String): Boolean {
-        return runCatching {
-            val json = JSONObject(configJson)
+    fun syncSettingsJson(settingsJson: String) {
+        runCatching {
+            val json = JSONObject(settingsJson)
             val current = settingsRepository.load()
             val updated = AssistantConfig(
                 name = json.optString("name", current.name).ifBlank { current.name },
@@ -97,51 +69,87 @@ class ShimiWebBridge(
             )
             settingsRepository.save(updated)
             AssistantEngine.applyConfig(updated)
+        }
+    }
+
+    @JavascriptInterface
+    fun setBackgroundAssistantEnabled(enabled: Boolean): String {
+        settingsRepository.updateBackgroundEnabled(enabled)
+        val ok = if (enabled) {
+            backgroundServiceManager.startService()
+        } else {
+            backgroundServiceManager.stopService()
             true
-        }.getOrDefault(false)
+        }
+        pushStateSnapshot()
+        return JSONObject()
+            .put("ok", ok)
+            .put(
+                "message",
+                if (enabled) {
+                    if (ok) "Shimi foreground service started." else "Grant Microphone permission before starting background listening."
+                } else {
+                    "Shimi foreground service stopped."
+                }
+            )
+            .toString()
     }
 
     @JavascriptInterface
-    fun executeAction(intentJson: String): String {
-        val result = AssistantEngine.executeIntentJson(intentJson)
-        return JSONObject().apply {
-            put("ok", result.ok)
-            put("status", result.status)
-            put("message", result.message)
-            put("requiresConfirmation", result.requiresConfirmation)
-            if (result.confirmationId != null) put("confirmationId", result.confirmationId)
-        }.toString()
+    fun startListening(): String {
+        AssistantEngine.triggerManualListen()
+        return JSONObject().put("ok", true).put("message", "Listening started.").toString()
     }
 
     @JavascriptInterface
-    fun confirmAction(confirmationId: String): Boolean {
-        return AssistantEngine.confirmPendingAction(confirmationId)
+    fun stopListening(): String {
+        AssistantEngine.stopListening()
+        return JSONObject().put("ok", true).put("message", "Listening stopped.").toString()
     }
 
     @JavascriptInterface
-    fun cancelAction(confirmationId: String): Boolean {
-        return AssistantEngine.cancelPendingAction(confirmationId)
+    fun executeActionJson(actionJson: String): String {
+        val result = AssistantEngine.executeIntentJson(actionJson)
+        return JSONObject()
+            .put("executed", result.ok)
+            .put("status", result.status)
+            .put("summary", result.message)
+            .put("detail", result.message)
+            .toString()
     }
 
     @JavascriptInterface
-    fun showFloatingAssistant(): Boolean {
-        return AssistantEngine.showOverlay()
+    fun confirmPendingAction(actionId: String): String {
+        val ok = AssistantEngine.confirmPendingAction(actionId)
+        return JSONObject()
+            .put("executed", ok)
+            .put("status", if (ok) "executed" else "error")
+            .put("summary", if (ok) "Confirmed and executed." else "No pending action found.")
+            .toString()
     }
 
     @JavascriptInterface
-    fun hideFloatingAssistant(): Boolean {
-        return AssistantEngine.hideOverlay()
+    fun cancelPendingAction(actionId: String): String {
+        val ok = AssistantEngine.cancelPendingAction(actionId)
+        return JSONObject().put("ok", ok).toString()
     }
 
     @JavascriptInterface
-    fun requestPermission(permissionKey: String): Boolean {
-        mainHandler.post { onRequestRuntimePermission(permissionKey) }
-        return true
+    fun openAndroidSetting(target: String): String {
+        val ok = permissionManager.openPermissionSettings(target)
+        return JSONObject()
+            .put("ok", ok)
+            .put("message", if (ok) "Opened Android $target settings." else "Could not open $target settings.")
+            .toString()
     }
 
     @JavascriptInterface
-    fun openAndroidSettings(target: String): Boolean {
-        return permissionManager.openPermissionSettings(target)
+    fun requestBatteryOptimizationExemption(): String {
+        val ok = permissionManager.openPermissionSettings("battery_optimization")
+        return JSONObject()
+            .put("ok", ok)
+            .put("message", "Opened Android battery optimization settings.")
+            .toString()
     }
 
     @JavascriptInterface
@@ -157,12 +165,24 @@ class ShimiWebBridge(
         return array.toString()
     }
 
+    @JavascriptInterface
+    fun getDebugLogsJson(): String = "[]"
+
+    @JavascriptInterface
+    fun requestPermission(permissionKey: String): Boolean {
+        mainHandler.post { onRequestRuntimePermission(permissionKey) }
+        return true
+    }
+
     fun pushStateSnapshot() {
         val snapshot = AssistantEngine.currentSnapshot(
             config = settingsRepository.load(),
             permissions = permissionManager.snapshotMap(),
             serviceRunning = backgroundServiceManager.isServiceRunning(),
-            overlayVisible = AssistantEngine.isOverlayVisible()
+            overlayVisible = AssistantEngine.isOverlayVisible(),
+            accessibilityConnected = permissionManager.hasAccessibility(),
+            notificationListenerConnected = permissionManager.hasNotificationListener(),
+            batteryOptimizationIgnored = permissionManager.isBatteryOptimizationIgnored()
         )
         pushEvent("SERVICE_STATE_CHANGED", snapshot)
     }
