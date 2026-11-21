@@ -1,13 +1,16 @@
-import type { PermissionKey, PermissionStateValue, PermissionStatusMap } from '../core/types';
+import type { PermissionKey, PermissionStateValue, PermissionStatusMap, SettingsTarget } from '../core/types';
+import { nativeBridge } from './nativeBridge';
 
 export const INITIAL_PERMISSION_STATUS: PermissionStatusMap = {
   microphone: 'prompt',
   camera: 'prompt',
   photos: 'prompt',
   notifications: 'prompt',
+  contacts: 'android_native_only',
   overlay: 'android_native_only',
   accessibility: 'android_native_only',
   notification_listener: 'android_native_only',
+  battery_optimization: 'android_native_only',
 };
 
 export interface PermissionDescriptor {
@@ -17,6 +20,7 @@ export interface PermissionDescriptor {
   whyNeeded: string;
   howToManage: string;
   androidPermissionName: string;
+  androidSettingsTarget?: SettingsTarget;
 }
 
 export const PERMISSION_CATALOG: PermissionDescriptor[] = [
@@ -24,9 +28,10 @@ export const PERMISSION_CATALOG: PermissionDescriptor[] = [
     key: 'microphone',
     title: 'Microphone',
     scope: 'web_and_android',
-    whyNeeded: 'Listens to your voice commands only while an assistant session is active and unmuted.',
-    howToManage: 'Tap Allow when prompted, or revoke anytime in Browser Site Settings or Android App Permissions.',
+    whyNeeded: 'Powers local wake-word listening and voice command capture only while enabled.',
+    howToManage: 'Allow when prompted, or revoke anytime in Browser Site Settings or Android App Permissions.',
     androidPermissionName: 'android.permission.RECORD_AUDIO',
+    androidSettingsTarget: 'app_details',
   },
   {
     key: 'camera',
@@ -35,6 +40,7 @@ export const PERMISSION_CATALOG: PermissionDescriptor[] = [
     whyNeeded: 'Opens the live viewfinder and runs countdown timers when you ask to take a picture.',
     howToManage: 'Requested only when you trigger a camera command or enable it here. Photos are never retained automatically.',
     androidPermissionName: 'android.permission.CAMERA',
+    androidSettingsTarget: 'app_details',
   },
   {
     key: 'photos',
@@ -48,33 +54,55 @@ export const PERMISSION_CATALOG: PermissionDescriptor[] = [
     key: 'notifications',
     title: 'Foreground & Alert Notifications',
     scope: 'web_and_android',
-    whyNeeded: 'Shows a clear notification indicator when the assistant session is active on Android 13+.',
+    whyNeeded: 'Displays the required transparent status notification whenever Shimi runs its foreground service on Android 13+.',
     howToManage: 'Enable or revoke in Browser Notifications or Android Settings > Apps > Shimi > Notifications.',
     androidPermissionName: 'android.permission.POST_NOTIFICATIONS',
+    androidSettingsTarget: 'notifications',
+  },
+  {
+    key: 'contacts',
+    title: 'Contacts (Optional)',
+    scope: 'android_native_only',
+    whyNeeded: 'Resolves contact names like "Call Rahul" locally on-device before asking for your call confirmation.',
+    howToManage: 'Native Android APK only: Settings > Apps > Shimi > Permissions > Contacts.',
+    androidPermissionName: 'android.permission.READ_CONTACTS',
+    androidSettingsTarget: 'app_details',
   },
   {
     key: 'overlay',
     title: 'Display Over Other Apps',
     scope: 'android_native_only',
-    whyNeeded: 'Allows the floating robot character to stay visible on top of other installed Android apps.',
-    howToManage: 'Native Android APK only: Settings > Apps > Special app access > Display over other apps > Shimi.',
+    whyNeeded: 'Keeps the small draggable Shimi floating robot available over other apps after minimizing.',
+    howToManage: 'Native Android APK: Settings > Apps > Special app access > Display over other apps > Shimi.',
     androidPermissionName: 'android.permission.SYSTEM_ALERT_WINDOW',
+    androidSettingsTarget: 'overlay',
   },
   {
     key: 'accessibility',
     title: 'Accessibility Service',
     scope: 'android_native_only',
-    whyNeeded: 'Enables scrolling, navigating back, and typing inside accessible third-party Android apps when permitted.',
-    howToManage: 'Native Android APK only: Settings > Accessibility > Installed apps > Shimi Assistant. Never bypasses protected screens.',
+    whyNeeded: 'Allows scrolling, clicking visible buttons, typing into editable fields, and back/home actions in other apps when no official API exists. Never bypasses security screens.',
+    howToManage: 'Native Android APK: Settings > Accessibility > Installed apps > Shimi Assistant.',
     androidPermissionName: 'android.permission.BIND_ACCESSIBILITY_SERVICE',
+    androidSettingsTarget: 'accessibility',
   },
   {
     key: 'notification_listener',
     title: 'Notification Access',
     scope: 'android_native_only',
-    whyNeeded: 'Allows Shimi to read incoming notifications from other Android apps aloud when you ask.',
-    howToManage: 'Native Android APK only: Settings > Notifications > Device & app notifications > Shimi.',
+    whyNeeded: 'Lets Shimi read incoming non-sensitive notifications aloud when you ask.',
+    howToManage: 'Native Android APK: Settings > Notifications > Device & app notifications > Shimi.',
     androidPermissionName: 'android.permission.BIND_NOTIFICATION_LISTENER_SERVICE',
+    androidSettingsTarget: 'notifications',
+  },
+  {
+    key: 'battery_optimization',
+    title: 'Unrestricted Battery (Optional)',
+    scope: 'android_native_only',
+    whyNeeded: 'Prevents aggressive Android OEM battery savers from killing the background wake-word foreground service.',
+    howToManage: 'Native Android APK: Settings > Apps > Shimi > Battery > Unrestricted.',
+    androidPermissionName: 'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+    androidSettingsTarget: 'battery',
   },
 ];
 
@@ -106,25 +134,56 @@ export async function inspectDevicePermissions(): Promise<PermissionStatusMap> {
     queryBrowserPermission('notifications'),
   ]);
 
-  return {
+  const base: PermissionStatusMap = {
     microphone,
     camera,
     photos: 'prompt',
     notifications,
+    contacts: 'android_native_only',
     overlay: 'android_native_only',
     accessibility: 'android_native_only',
     notification_listener: 'android_native_only',
+    battery_optimization: 'android_native_only',
   };
+
+  // Merge truthful live permissions from native Android APK if attached
+  if (nativeBridge.isNativeAvailable()) {
+    const snap = nativeBridge.getSnapshot();
+    return {
+      ...base,
+      ...(snap.permissions ?? {}),
+      overlay: snap.permissions?.overlay ?? (snap.overlayVisible ? 'granted' : 'prompt'),
+      accessibility: snap.accessibilityConnected ? 'granted' : 'prompt',
+      notification_listener: snap.notificationListenerConnected ? 'granted' : 'prompt',
+      battery_optimization: snap.batteryOptimizationIgnored ? 'granted' : 'prompt',
+    };
+  }
+
+  return base;
 }
 
 export async function requestRealPermission(
   key: PermissionKey
 ): Promise<{ state: PermissionStateValue; message: string }> {
-  if (key === 'overlay' || key === 'accessibility' || key === 'notification_listener') {
+  const descriptor = PERMISSION_CATALOG.find((p) => p.key === key);
+
+  if (descriptor?.scope === 'android_native_only') {
+    if (nativeBridge.isNativeAvailable()) {
+      const target: SettingsTarget = descriptor.androidSettingsTarget ?? 'app_details';
+      const res =
+        key === 'battery_optimization'
+          ? nativeBridge.requestBatteryOptimizationExemption()
+          : nativeBridge.openAndroidSetting(target);
+      const updated = await inspectDevicePermissions();
+      return {
+        state: updated[key],
+        message: res.message,
+      };
+    }
     return {
       state: 'android_native_only',
       message:
-        'This permission is controlled by Android OS and only activates in the native Android APK build (included in the Android Export tab).',
+        'This permission is managed by Android OS and activates when Shimi runs inside the native Android APK companion.',
     };
   }
 
@@ -165,7 +224,6 @@ export async function requestRealPermission(
     const stream = await navigator.mediaDevices.getUserMedia(
       key === 'microphone' ? { audio: true } : { video: true }
     );
-    // Immediately stop hardware tracks after verifying permission so we never leave mic/camera active!
     stream.getTracks().forEach((track) => track.stop());
     return {
       state: 'granted',

@@ -110,6 +110,13 @@ export const FloatingRobotOverlay: React.FC<FloatingRobotOverlayProps> = ({
     }
   };
 
+  const robotPx =
+    preferences.floatingSize === 'small'
+      ? 60
+      : preferences.floatingSize === 'large'
+        ? 92
+        : 76;
+
   return (
     <aside
       aria-label={`Floating ${preferences.name} companion`}
@@ -118,6 +125,7 @@ export const FloatingRobotOverlay: React.FC<FloatingRobotOverlayProps> = ({
       style={{
         left: 0,
         top: 0,
+        opacity: Math.max(0.45, Math.min(1, preferences.floatingOpacity ?? 0.94)),
         transform: `translate3d(${pos.x}px, ${pos.y}px, 0)`,
       }}
     >
@@ -147,7 +155,7 @@ export const FloatingRobotOverlay: React.FC<FloatingRobotOverlayProps> = ({
           robotStyle={preferences.robotStyle}
           accessory={preferences.accessory}
           audioLevel={audioLevel}
-          size={76}
+          size={robotPx}
           batterySaver={preferences.batterySaver}
           onClick={() => setExpanded((prev) => !prev)}
           ariaLabel={`Toggle floating ${preferences.name} controls`}

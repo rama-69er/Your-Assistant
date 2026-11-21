@@ -15,11 +15,14 @@ import {
   X,
 } from 'lucide-react';
 import { RobotCharacter } from './RobotCharacter';
+import { DebugPipelinePanel } from './DebugPipelinePanel';
 import { ALL_ROBOT_STATES, ROBOT_STATE_META } from '../core/robotStateMachine';
 import type {
   ActionExecutionRecord,
   AssistantPreferences,
   ConversationTurn,
+  DebugTraceEntry,
+  NativeServiceSnapshot,
   RobotState,
 } from '../core/types';
 
@@ -38,6 +41,9 @@ interface DashboardViewProps {
   speechSupported: boolean;
   conversation: ConversationTurn[];
   actionLog: ActionExecutionRecord[];
+  nativeSnapshot: NativeServiceSnapshot;
+  debugTraces: DebugTraceEntry[];
+  onClearDebugTraces: () => void;
   onStartSession: () => void;
   onStopSession: () => void;
   onTogglePause: () => void;
@@ -52,12 +58,14 @@ interface DashboardViewProps {
 }
 
 const EXAMPLE_COMMANDS = [
+  'Turn on flashlight',
+  'Set a timer for 10 minutes',
+  'Set an alarm for 7 AM',
+  'Open Wi-Fi settings',
   'Open my camera',
-  'Take a picture after five seconds',
   'Open YouTube and search for relaxing music',
-  'Open Maps and navigate to Central Park',
   'Open WhatsApp and send a message to Alex saying see you soon',
-  'Find a picture of Lucky in my gallery',
+  'Call Rahul',
   'Read my latest notification',
   'What can you do?',
 ];
@@ -98,6 +106,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   speechSupported,
   conversation,
   actionLog,
+  nativeSnapshot,
+  debugTraces,
+  onClearDebugTraces,
   onStartSession,
   onStopSession,
   onTogglePause,
@@ -138,13 +149,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   {preferences.name}
                 </h1>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  {isSessionActive
-                    ? isPaused
-                      ? 'Session paused · Microphone off'
-                      : isListening
-                        ? 'Session active · Microphone listening'
-                        : 'Session active · Tap microphone or type'
-                    : 'Assistant stopped · Microphone off'}
+                  {nativeSnapshot.connected
+                    ? nativeSnapshot.serviceRunning
+                      ? `Android background service active · Wake word "${preferences.wakeWord}"`
+                      : 'Android companion connected · Background service off'
+                    : isSessionActive
+                      ? isPaused
+                        ? 'Session paused · Microphone off'
+                        : isListening
+                          ? 'Session active · Microphone listening'
+                          : 'Session active · Tap microphone or type'
+                      : 'Browser PWA mode · Tap Start to talk'}
                 </p>
               </div>
               <span className="text-xs font-medium text-slate-600 whitespace-nowrap">
@@ -307,9 +322,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="min-w-0">
                 <h2 className="text-lg font-bold text-slate-900">Voice &amp; Action Console</h2>
                 <p className="text-xs text-slate-500">
-                  {preferences.cloudGeminiEnabled
-                    ? 'Cloud Gemini enabled · Ephemeral session'
-                    : 'Local on-device mode · Zero cloud data'}
+                  {preferences.aiMode === 'offline_only' || !preferences.cloudGeminiEnabled
+                    ? 'Offline-only mode · Local command router active'
+                    : 'Offline-first local commands · Gemini online for open questions'}
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -511,6 +526,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </section>
       </div>
+
+      {preferences.debugModeEnabled && (
+        <DebugPipelinePanel
+          traces={debugTraces}
+          nativeConnected={nativeSnapshot.connected}
+          serviceRunning={nativeSnapshot.serviceRunning}
+          wakeWord={preferences.wakeWord}
+          aiMode={preferences.aiMode}
+          onClear={onClearDebugTraces}
+        />
+      )}
     </div>
   );
 };

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
@@ -25,6 +26,32 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
+function collectAndroidProjectFiles(rootDir: string): { label: string; path: string; content: string }[] {
+  const androidDir = path.resolve(rootDir, 'android');
+  if (!fs.existsSync(androidDir)) return [];
+
+  const results: { label: string; path: string; content: string }[] = [];
+  const walk = (dir: string) => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'build' || entry.name === '.gradle') continue;
+        walk(fullPath);
+      } else if (/\.(kt|kts|xml|properties|md)$/i.test(entry.name)) {
+        const relPath = path.relative(rootDir, fullPath).replace(/\\/g, '/');
+        results.push({
+          label: entry.name,
+          path: relPath,
+          content: fs.readFileSync(fullPath, 'utf8'),
+        });
+      }
+    }
+  };
+  walk(androidDir);
+  return results;
+}
+
 const INTERPRETATION_SCHEMA = {
   type: Type.OBJECT,
   properties: {
@@ -36,20 +63,25 @@ const INTERPRETATION_SCHEMA = {
       type: Type.STRING,
       description: 'One of: IDLE, SPEAKING, SUCCESS, CONFUSED, SORRY',
     },
+    category: {
+      type: Type.STRING,
+      description:
+        'One of: LOCAL_ANDROID_ACTION, ACCESSIBILITY_UI, APP_LAUNCH, COMMUNICATION, DEVICE_SETTING, INFORMATION, CLOUD_GEMINI, UNSUPPORTED_RESTRICTED',
+    },
     intent: {
       type: Type.STRING,
       description:
-        'One of: OPEN_CAMERA, TAKE_PHOTO_TIMER, OPEN_YOUTUBE_SEARCH, OPEN_MAPS_NAVIGATE, COMPOSE_MESSAGE, FIND_PHOTO, READ_NOTIFICATIONS, SCROLL_PAGE, NAVIGATE_BACK, GO_HOME, LIST_CAPABILITIES, CLARIFY, CONVERSATION, UNSUPPORTED_ANDROID_ACTION',
+        'One of: OPEN_CAMERA, TAKE_PHOTO_TIMER, OPEN_YOUTUBE_SEARCH, OPEN_MAPS_NAVIGATE, OPEN_CHROME_SEARCH, COMPOSE_MESSAGE, CALL_CONTACT, OPEN_CONTACTS, OPEN_CALENDAR, SET_REMINDER, FIND_PHOTO, READ_NOTIFICATIONS, FLASHLIGHT_TOGGLE, VOLUME_CONTROL, MEDIA_CONTROL, SET_TIMER, SET_ALARM, OPEN_APP, OPEN_SETTINGS, SCROLL_PAGE, CLICK_UI_ELEMENT, NAVIGATE_BACK, GO_HOME, OPEN_RECENTS, LIST_CAPABILITIES, CLARIFY, CONVERSATION, UNSUPPORTED_ANDROID_ACTION',
     },
     requiresConfirmation: {
       type: Type.BOOLEAN,
       description:
-        'True for consequential operations like composing/sending messages, payments, deletions, or posting.',
+        'True for consequential operations like sending messages, calling, payments, deletions, or posting.',
     },
     requiredPermission: {
       type: Type.STRING,
       description:
-        'One of: none, microphone, camera, photos, notifications, overlay, accessibility, notification_listener',
+        'One of: none, microphone, camera, photos, notifications, contacts, overlay, accessibility, notification_listener, battery_optimization',
     },
     missingInfoQuestion: {
       type: Type.STRING,
@@ -63,13 +95,26 @@ const INTERPRETATION_SCHEMA = {
         contact: { type: Type.STRING },
         messageBody: { type: Type.STRING },
         timerSeconds: { type: Type.INTEGER },
+        alarmHour: { type: Type.INTEGER },
+        alarmMinute: { type: Type.INTEGER },
         direction: { type: Type.STRING },
         photoSubject: { type: Type.STRING },
         appName: { type: Type.STRING },
+        uiElementText: { type: Type.STRING },
+        reminderText: { type: Type.STRING },
+        reminderTime: { type: Type.STRING },
       },
     },
   },
-  required: ['spokenReply', 'robotState', 'intent', 'requiresConfirmation', 'requiredPermission', 'parameters'],
+  required: [
+    'spokenReply',
+    'robotState',
+    'category',
+    'intent',
+    'requiresConfirmation',
+    'requiredPermission',
+    'parameters',
+  ],
 };
 
 async function createServer() {
@@ -82,6 +127,16 @@ async function createServer() {
       geminiConfigured: Boolean(getGeminiClient()),
       persistence: 'ephemeral_none',
     });
+  });
+
+  // Serves the actual native Android Kotlin/Gradle files stored in /android/
+  app.get('/api/android-project', (_req, res) => {
+    try {
+      const files = collectAndroidProjectFiles(__dirname);
+      res.json({ count: files.length, files });
+    } catch {
+      res.status(500).json({ error: 'READ_FAILED', files: [] });
+    }
   });
 
   app.post('/api/shimi/interpret', async (req, res) => {
@@ -111,24 +166,17 @@ async function createServer() {
           .join('\n')
       : '';
 
-    const systemInstruction = `You are ${safeName}, a cute, trustworthy, privacy-first personal phone assistant.
+    const systemInstruction = `You are ${safeName}, a cute, trustworthy, privacy-first personal Android phone assistant.
 Personality: ${safePersonality === 'playful' ? 'warm, upbeat, lightly playful' : safePersonality === 'calm' ? 'calm, steady, concise' : 'warm, friendly, helpful'}.
 Keep spokenReply concise (1-2 short natural sentences). Never claim you did something you cannot do.
 
-Current platform runtime: Installable Web/PWA companion (with native Android blueprint).
-Current browser/device permissions: ${JSON.stringify(permissions ?? {})}.
+Current device permissions: ${JSON.stringify(permissions ?? {})}.
 
 Rules:
-1. If user asks to open camera or take a picture (optionally with countdown seconds), map to OPEN_CAMERA or TAKE_PHOTO_TIMER with timerSeconds (default 3 if unspecified). If camera permission is "denied", set robotState to "SORRY" and explain clearly that camera permission is needed.
-2. If user asks to search YouTube, map to OPEN_YOUTUBE_SEARCH with parameters.query. If query is missing, map to CLARIFY and robotState "CONFUSED".
-3. If user asks to open Maps / navigate, map to OPEN_MAPS_NAVIGATE with parameters.destination. If destination is vague like "my destination", map to CLARIFY and robotState "CONFUSED".
-4. If user asks to send/compose a WhatsApp or SMS message, map to COMPOSE_MESSAGE with parameters.contact, parameters.messageBody, parameters.appName, and ALWAYS set requiresConfirmation = true. Never pretend it was already sent.
-5. If user asks to find a picture in gallery (e.g. "find a picture of Lucky"), map to FIND_PHOTO with parameters.photoSubject and requiredPermission = "photos". Explain that you open the scoped Photo Picker so they stay in control.
-6. If user asks to read system notifications from other apps, map to READ_NOTIFICATIONS, robotState = "SORRY", requiredPermission = "notification_listener", and honestly explain that reading other apps' Android notifications requires the native Android Notification Listener permission.
-7. If user asks to scroll down/up, go back, or go home, map to SCROLL_PAGE (direction: "up"|"down"), NAVIGATE_BACK, or GO_HOME.
-8. If user asks to pay, buy, transfer money, or delete data, map to UNSUPPORTED_ANDROID_ACTION, requiresConfirmation = true, robotState = "SORRY", and explain that you never bypass security or execute payments/deletions automatically.
-9. If user asks what you can do, map to LIST_CAPABILITIES and briefly list your real supported actions.
-10. If unclear, map to CLARIFY and robotState = "CONFUSED".`;
+1. Simple phone actions (flashlight, volume, timers, alarms, apps, settings) are normally handled locally, so if one reaches you because of complex phrasing, map it cleanly to the exact structured intent.
+2. For open-ended questions (cooking ideas, trivia, advice, planning), answer concisely in spokenReply with intent = "CONVERSATION", category = "CLOUD_GEMINI", robotState = "SPEAKING".
+3. For consequential actions (COMPOSE_MESSAGE, CALL_CONTACT, payments, deletions, emails, posting), ALWAYS set requiresConfirmation = true. Never pretend it was already executed.
+4. For unclear commands, map to CLARIFY and robotState = "CONFUSED".`;
 
     const promptText = contextSummary
       ? `Recent session context (ephemeral, not stored):\n${contextSummary}\n\nLatest user command:\n${utterance.trim()}`
@@ -149,8 +197,11 @@ Rules:
       const rawText = (response.text ?? '').trim();
       const parsed = JSON.parse(rawText);
 
-      // Enforce hard confirmation invariant server-side for consequential intents
-      if (parsed.intent === 'COMPOSE_MESSAGE' || parsed.intent === 'UNSUPPORTED_ANDROID_ACTION') {
+      if (
+        parsed.intent === 'COMPOSE_MESSAGE' ||
+        parsed.intent === 'CALL_CONTACT' ||
+        parsed.intent === 'UNSUPPORTED_ANDROID_ACTION'
+      ) {
         parsed.requiresConfirmation = true;
       }
 
@@ -227,7 +278,6 @@ Rules:
     }
   });
 
-  // Ephemeral in-memory scoped photo matcher (never writes to disk or stores photos)
   app.post('/api/shimi/analyze-photo', async (req, res) => {
     const ai = getGeminiClient();
     if (!ai) {
@@ -261,6 +311,7 @@ Rules:
           ],
         },
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,

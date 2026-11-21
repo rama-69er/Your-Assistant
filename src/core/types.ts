@@ -22,6 +22,14 @@ export type PersonalityStyle = 'warm' | 'playful' | 'calm';
 
 export type VoiceOutputMode = 'gemini_tts' | 'device_tts' | 'muted';
 
+export type AIMode = 'auto' | 'offline_only';
+
+export type WakeWordSensitivity = 'low' | 'balanced' | 'high';
+
+export type FloatingMode = 'overlay' | 'bubble' | 'notification';
+
+export type FloatingSize = 'small' | 'medium' | 'large';
+
 export interface RobotColorTheme {
   id: string;
   label: string;
@@ -40,10 +48,21 @@ export interface AssistantPreferences {
   accessory: RobotAccessory;
   personality: PersonalityStyle;
   cloudGeminiEnabled: boolean;
+  aiMode: AIMode;
   voiceOutputMode: VoiceOutputMode;
   batterySaver: boolean;
   showFloatingOnStart: boolean;
   wakePhrasePrefixEnabled: boolean;
+  // Native Android & Background Assistant settings
+  backgroundAssistantEnabled: boolean;
+  wakeWord: string;
+  wakeWordEnabled: boolean;
+  wakeWordSensitivity: WakeWordSensitivity;
+  confirmConsequentialActions: boolean;
+  floatingMode: FloatingMode;
+  floatingSize: FloatingSize;
+  floatingOpacity: number; // 0.5 .. 1.0
+  debugModeEnabled: boolean;
 }
 
 export type PermissionKey =
@@ -51,9 +70,11 @@ export type PermissionKey =
   | 'camera'
   | 'photos'
   | 'notifications'
+  | 'contacts'
   | 'overlay'
   | 'accessibility'
-  | 'notification_listener';
+  | 'notification_listener'
+  | 'battery_optimization';
 
 export type PermissionStateValue =
   | 'granted'
@@ -64,21 +85,56 @@ export type PermissionStateValue =
 
 export type PermissionStatusMap = Record<PermissionKey, PermissionStateValue>;
 
+export type CommandCategory =
+  | 'LOCAL_ANDROID_ACTION'
+  | 'ACCESSIBILITY_UI'
+  | 'APP_LAUNCH'
+  | 'COMMUNICATION'
+  | 'DEVICE_SETTING'
+  | 'INFORMATION'
+  | 'CLOUD_GEMINI'
+  | 'UNSUPPORTED_RESTRICTED';
+
 export type ShimiIntent =
   | 'OPEN_CAMERA'
   | 'TAKE_PHOTO_TIMER'
   | 'OPEN_YOUTUBE_SEARCH'
   | 'OPEN_MAPS_NAVIGATE'
+  | 'OPEN_CHROME_SEARCH'
   | 'COMPOSE_MESSAGE'
+  | 'CALL_CONTACT'
+  | 'OPEN_CONTACTS'
+  | 'OPEN_CALENDAR'
+  | 'SET_REMINDER'
   | 'FIND_PHOTO'
   | 'READ_NOTIFICATIONS'
+  | 'FLASHLIGHT_TOGGLE'
+  | 'VOLUME_CONTROL'
+  | 'MEDIA_CONTROL'
+  | 'SET_TIMER'
+  | 'SET_ALARM'
+  | 'OPEN_APP'
+  | 'OPEN_SETTINGS'
   | 'SCROLL_PAGE'
+  | 'CLICK_UI_ELEMENT'
   | 'NAVIGATE_BACK'
   | 'GO_HOME'
+  | 'OPEN_RECENTS'
   | 'LIST_CAPABILITIES'
   | 'CLARIFY'
   | 'CONVERSATION'
   | 'UNSUPPORTED_ANDROID_ACTION';
+
+export type SettingsTarget =
+  | 'general'
+  | 'wifi'
+  | 'bluetooth'
+  | 'battery'
+  | 'display'
+  | 'accessibility'
+  | 'notifications'
+  | 'overlay'
+  | 'app_details';
 
 export interface ShimiActionParameters {
   query?: string;
@@ -86,20 +142,33 @@ export interface ShimiActionParameters {
   contact?: string;
   messageBody?: string;
   timerSeconds?: number;
+  alarmHour?: number;
+  alarmMinute?: number;
+  alarmLabel?: string;
   direction?: 'up' | 'down';
   photoSubject?: string;
   appName?: string;
+  packageName?: string;
+  flashlightOn?: boolean;
+  volumeAction?: 'up' | 'down' | 'mute' | 'unmute';
+  mediaAction?: 'play_pause' | 'next' | 'previous';
+  settingsTarget?: SettingsTarget;
+  uiElementText?: string;
+  reminderText?: string;
+  reminderTime?: string;
 }
 
 export interface ShimiInterpretation {
   spokenReply: string;
   robotState: RobotState;
   intent: ShimiIntent;
+  category: CommandCategory;
   parameters: ShimiActionParameters;
   requiresConfirmation: boolean;
   requiredPermission: PermissionKey | 'none';
   missingInfoQuestion?: string;
-  source: 'gemini' | 'local';
+  source: 'gemini' | 'local' | 'native_android';
+  requiresCloud?: boolean;
 }
 
 export type ActionExecutionStatus =
@@ -115,6 +184,8 @@ export interface ActionExecutionRecord {
   timestamp: number;
   userUtterance: string;
   intent: ShimiIntent;
+  category: CommandCategory;
+  executor: 'local_android_native' | 'accessibility_native' | 'web_browser' | 'gemini_cloud';
   requiredPermission: PermissionKey | 'none';
   status: ActionExecutionStatus;
   summary: string;
@@ -131,7 +202,7 @@ export interface ConversationTurn {
   text: string;
   robotState?: RobotState;
   intent?: ShimiIntent;
-  source?: 'gemini' | 'local';
+  source?: 'gemini' | 'local' | 'native_android';
   timestamp: number;
 }
 
@@ -143,4 +214,67 @@ export interface ScopedPhotoItem {
   previewUrl: string;
   matched?: boolean;
   matchReason?: string;
+}
+
+export type DebugStage =
+  | 'WAKE_WORD'
+  | 'SPEECH'
+  | 'INTENT'
+  | 'EXECUTOR'
+  | 'ANDROID_ACTION'
+  | 'RESULT'
+  | 'BRIDGE'
+  | 'ERROR';
+
+export interface DebugTraceEntry {
+  id: string;
+  timestamp: number;
+  stage: DebugStage;
+  summary: string;
+  detail?: string;
+  durationMs?: number;
+  ok: boolean;
+}
+
+export interface InstalledAppInfo {
+  label: string;
+  packageName: string;
+}
+
+export interface NativeServiceSnapshot {
+  connected: boolean;
+  androidSdkInt?: number;
+  serviceRunning: boolean;
+  wakeWordActive: boolean;
+  listening: boolean;
+  speaking: boolean;
+  overlayVisible: boolean;
+  accessibilityConnected: boolean;
+  notificationListenerConnected: boolean;
+  batteryOptimizationIgnored: boolean;
+  robotState: RobotState;
+  lastRecognizedText?: string;
+  lastResponseText?: string;
+  permissions?: Partial<PermissionStatusMap>;
+  installedAppsCount?: number;
+}
+
+export type NativeEventType =
+  | 'WAKE_WORD_DETECTED'
+  | 'LISTENING_STARTED'
+  | 'SPEECH_PARTIAL'
+  | 'SPEECH_FINAL'
+  | 'COMMAND_EXECUTING'
+  | 'ACTION_COMPLETED'
+  | 'ACTION_FAILED'
+  | 'CONFIRMATION_REQUIRED'
+  | 'ASSISTANT_SPEAKING'
+  | 'PERMISSION_MISSING'
+  | 'SERVICE_STATE_CHANGED'
+  | 'DEBUG_TRACE';
+
+export interface NativeBridgeEvent {
+  type: NativeEventType;
+  timestamp: number;
+  payload: Record<string, unknown>;
 }

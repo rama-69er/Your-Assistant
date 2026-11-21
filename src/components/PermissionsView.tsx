@@ -6,7 +6,9 @@ import type { PermissionKey, PermissionStateValue, PermissionStatusMap } from '.
 interface PermissionsViewProps {
   assistantName: string;
   permissions: PermissionStatusMap;
+  nativeConnected: boolean;
   onRequestPermission: (key: PermissionKey) => Promise<string>;
+  onOpenNativeSettings: (key: PermissionKey) => void;
   onRefreshPermissions: () => Promise<void>;
 }
 
@@ -28,7 +30,9 @@ function formatState(state: PermissionStateValue): { label: string; colorClass: 
 export const PermissionsView: React.FC<PermissionsViewProps> = ({
   assistantName,
   permissions,
+  nativeConnected,
   onRequestPermission,
+  onOpenNativeSettings,
   onRefreshPermissions,
 }) => {
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -139,34 +143,61 @@ export const PermissionsView: React.FC<PermissionsViewProps> = ({
         <div className="flex items-center gap-2.5">
           <Smartphone className="w-5 h-5 text-slate-700" aria-hidden="true" />
           <h2 className="text-base font-bold text-slate-900">
-            Native Android OS Permissions (Kotlin APK Only)
+            Native Android OS Permissions ({nativeConnected ? 'Android Companion Active' : 'Kotlin APK Required'})
           </h2>
         </div>
         <p className="mt-1.5 text-xs text-slate-600 leading-relaxed max-w-3xl">
           Android strictly isolates browsers from system-wide overlays, accessibility automation,
-          and other apps&apos; notifications. Even when granted on a native Android APK,{' '}
-          {assistantName} respects protected screens, banking/payment confirmation dialogs, and
-          Android security boundaries.
+          battery optimization exemptions, and other apps&apos; notifications. Even when granted on
+          the native Android companion APK, {assistantName} never automates passwords, banking/payment
+          confirmations, or Android security dialogs.
         </p>
 
         <div className="mt-5 divide-y divide-slate-100">
-          {nativePerms.map((item) => (
-            <div key={item.key} className="py-4 first:pt-0 last:pb-0 space-y-1">
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-semibold text-slate-900">{item.title}</span>
-                <span className="text-slate-300" aria-hidden="true">·</span>
-                <span className="text-xs font-medium text-amber-700">
-                  Not granted in web sandbox
-                </span>
-                <span className="text-slate-300" aria-hidden="true">·</span>
-                <span className="font-mono text-[11px] text-slate-500">
-                  {item.androidPermissionName}
-                </span>
+          {nativePerms.map((item) => {
+            const st = permissions[item.key];
+            const meta = formatState(st);
+            return (
+              <div
+                key={item.key}
+                className="py-4 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+              >
+                <div className="space-y-1 max-w-2xl">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="font-semibold text-slate-900">{item.title}</span>
+                    <span className="text-slate-300" aria-hidden="true">·</span>
+                    <span className={`text-xs font-medium ${meta.colorClass}`}>
+                      {nativeConnected ? meta.label : 'Not granted in web sandbox'}
+                    </span>
+                    <span className="text-slate-300" aria-hidden="true">·</span>
+                    <span className="font-mono text-[11px] text-slate-500">
+                      {item.androidPermissionName}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 leading-relaxed">{item.whyNeeded}</p>
+                  <p className="text-[11px] text-slate-500">{item.howToManage}</p>
+                </div>
+
+                {nativeConnected && (
+                  <button
+                    type="button"
+                    disabled={st === 'granted'}
+                    onClick={() => {
+                      onOpenNativeSettings(item.key);
+                      setFeedback(`Opened Android Settings for ${item.title}.`);
+                    }}
+                    className={`min-h-[42px] rounded-xl px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                      st === 'granted'
+                        ? 'bg-slate-100 text-slate-500 cursor-default'
+                        : 'bg-slate-900 text-white hover:bg-slate-800 cursor-pointer'
+                    }`}
+                  >
+                    {st === 'granted' ? 'Enabled' : 'Open Android Settings'}
+                  </button>
+                )}
               </div>
-              <p className="text-xs text-slate-600 leading-relaxed">{item.whyNeeded}</p>
-              <p className="text-[11px] text-slate-500">{item.howToManage}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
     </div>

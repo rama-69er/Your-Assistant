@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Shimi</string>
+    <string name="accessibility_service_label">Shimi Voice Assistant</string>
+    <string name="accessibility_service_description">Allows Shimi to scroll, go back, inspect visible labels, and tap controls only when you ask by voice. Shimi never bypasses passwords, banking screens, or Android permission dialogs.</string>
+    <string name="notification_listener_label">Shimi Notification Reader</string>
+</resources>

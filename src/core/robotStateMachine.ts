@@ -1,10 +1,14 @@
 import type {
+  AIMode,
   AssistantPreferences,
+  FloatingMode,
+  FloatingSize,
+  PersonalityStyle,
   RobotAccessory,
   RobotColorTheme,
   RobotState,
   RobotStyle,
-  PersonalityStyle,
+  WakeWordSensitivity,
 } from './types';
 
 export const ROBOT_COLOR_THEMES: RobotColorTheme[] = [
@@ -63,10 +67,20 @@ export const DEFAULT_PREFERENCES: AssistantPreferences = {
   accessory: 'none',
   personality: 'warm',
   cloudGeminiEnabled: true,
+  aiMode: 'auto',
   voiceOutputMode: 'gemini_tts',
   batterySaver: false,
   showFloatingOnStart: true,
   wakePhrasePrefixEnabled: true,
+  backgroundAssistantEnabled: false,
+  wakeWord: 'Shimi',
+  wakeWordEnabled: true,
+  wakeWordSensitivity: 'balanced',
+  confirmConsequentialActions: true,
+  floatingMode: 'overlay',
+  floatingSize: 'medium',
+  floatingOpacity: 0.92,
+  debugModeEnabled: false,
 };
 
 export const ROBOT_STATE_META: Record<
@@ -184,10 +198,28 @@ export function sanitizePreferences(raw: Partial<AssistantPreferences> | null | 
   const validStyles: RobotStyle[] = ['pod', 'aero', 'deskbot'];
   const validAccessories: RobotAccessory[] = ['none', 'halo', 'beanie', 'glasses', 'headphones', 'star'];
   const validPersonalities: PersonalityStyle[] = ['warm', 'playful', 'calm'];
+  const validAIModes: AIMode[] = ['auto', 'offline_only'];
+  const validSens: WakeWordSensitivity[] = ['low', 'balanced', 'high'];
+  const validFloatingModes: FloatingMode[] = ['overlay', 'bubble', 'notification'];
+  const validFloatingSizes: FloatingSize[] = ['small', 'medium', 'large'];
+
   const nameCheck = validateAssistantName(typeof raw.name === 'string' ? raw.name : '');
+  const resolvedName = nameCheck.valid ? nameCheck.cleaned : DEFAULT_PREFERENCES.name;
+  const wakeCheck = validateAssistantName(typeof raw.wakeWord === 'string' ? raw.wakeWord : '');
+
+  const aiMode: AIMode = validAIModes.includes(raw.aiMode as AIMode)
+    ? (raw.aiMode as AIMode)
+    : raw.cloudGeminiEnabled === false
+      ? 'offline_only'
+      : 'auto';
+
+  const opacity =
+    typeof raw.floatingOpacity === 'number' && Number.isFinite(raw.floatingOpacity)
+      ? Math.max(0.5, Math.min(1, raw.floatingOpacity))
+      : DEFAULT_PREFERENCES.floatingOpacity;
 
   return {
-    name: nameCheck.valid ? nameCheck.cleaned : DEFAULT_PREFERENCES.name,
+    name: resolvedName,
     onboardingCompleted: Boolean(raw.onboardingCompleted),
     themeId: ROBOT_COLOR_THEMES.some((t) => t.id === raw.themeId)
       ? (raw.themeId as string)
@@ -201,10 +233,8 @@ export function sanitizePreferences(raw: Partial<AssistantPreferences> | null | 
     personality: validPersonalities.includes(raw.personality as PersonalityStyle)
       ? (raw.personality as PersonalityStyle)
       : DEFAULT_PREFERENCES.personality,
-    cloudGeminiEnabled:
-      typeof raw.cloudGeminiEnabled === 'boolean'
-        ? raw.cloudGeminiEnabled
-        : DEFAULT_PREFERENCES.cloudGeminiEnabled,
+    cloudGeminiEnabled: aiMode === 'auto' && raw.cloudGeminiEnabled !== false,
+    aiMode,
     voiceOutputMode:
       raw.voiceOutputMode === 'gemini_tts' ||
       raw.voiceOutputMode === 'device_tts' ||
@@ -220,5 +250,26 @@ export function sanitizePreferences(raw: Partial<AssistantPreferences> | null | 
       typeof raw.wakePhrasePrefixEnabled === 'boolean'
         ? raw.wakePhrasePrefixEnabled
         : DEFAULT_PREFERENCES.wakePhrasePrefixEnabled,
+    backgroundAssistantEnabled: Boolean(raw.backgroundAssistantEnabled),
+    wakeWord: wakeCheck.valid ? wakeCheck.cleaned : resolvedName,
+    wakeWordEnabled:
+      typeof raw.wakeWordEnabled === 'boolean'
+        ? raw.wakeWordEnabled
+        : DEFAULT_PREFERENCES.wakeWordEnabled,
+    wakeWordSensitivity: validSens.includes(raw.wakeWordSensitivity as WakeWordSensitivity)
+      ? (raw.wakeWordSensitivity as WakeWordSensitivity)
+      : DEFAULT_PREFERENCES.wakeWordSensitivity,
+    confirmConsequentialActions:
+      typeof raw.confirmConsequentialActions === 'boolean'
+        ? raw.confirmConsequentialActions
+        : DEFAULT_PREFERENCES.confirmConsequentialActions,
+    floatingMode: validFloatingModes.includes(raw.floatingMode as FloatingMode)
+      ? (raw.floatingMode as FloatingMode)
+      : DEFAULT_PREFERENCES.floatingMode,
+    floatingSize: validFloatingSizes.includes(raw.floatingSize as FloatingSize)
+      ? (raw.floatingSize as FloatingSize)
+      : DEFAULT_PREFERENCES.floatingSize,
+    floatingOpacity: opacity,
+    debugModeEnabled: Boolean(raw.debugModeEnabled),
   };
 }

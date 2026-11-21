@@ -15,6 +15,8 @@ const DEFAULT_PERMS: PermissionStatusMap = {
   overlay: 'android_native_only',
   accessibility: 'android_native_only',
   notification_listener: 'android_native_only',
+  contacts: 'android_native_only',
+  battery_optimization: 'android_native_only',
 };
 
 test('stripWakePhrase removes custom assistant wake prefixes cleanly', () => {
