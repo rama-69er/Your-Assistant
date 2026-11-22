@@ -1,5 +1,6 @@
 package com.shimi.assistant.data
 
+import com.shimi.assistant.BuildConfig
 import kotlinx.serialization.Serializable
 
 enum class RobotState {
@@ -23,10 +24,10 @@ enum class AIMode(val wireValue: String) {
     }
 }
 
-enum class WakeWordSensitivity(val wireValue: String, val energyThreshold: Int) {
-    LOW("low", 2100),
-    BALANCED("balanced", 1450),
-    HIGH("high", 950);
+enum class WakeWordSensitivity(val wireValue: String, val scoreThreshold: Float, val rmsFloor: Int) {
+    LOW("low", 0.78f, 1900),
+    BALANCED("balanced", 0.64f, 1300),
+    HIGH("high", 0.52f, 850);
 
     companion object {
         fun fromWire(value: String?): WakeWordSensitivity =
@@ -56,15 +57,25 @@ enum class FloatingSize(val wireValue: String, val sizeDp: Int) {
     }
 }
 
+/**
+ * Single versioned AssistantConfig shared between the native Android companion and the PWA UI.
+ * First launch populates defaults from generated BuildConfig.SHIMI_DEFAULT_* fields.
+ */
 @Serializable
 data class AssistantConfig(
-    val name: String = "Shimi",
-    val wakeWord: String = "Shimi",
+    val schemaVersion: Int = 2,
+    val name: String = BuildConfig.SHIMI_DEFAULT_NAME,
+    val wakeWord: String = BuildConfig.SHIMI_DEFAULT_WAKE_WORD,
     val wakeWordEnabled: Boolean = true,
     val wakeWordSensitivity: String = "balanced",
+    val robotStyle: String = BuildConfig.SHIMI_DEFAULT_STYLE,
+    val accessory: String = BuildConfig.SHIMI_DEFAULT_ACCESSORY,
+    val themeId: String = BuildConfig.SHIMI_DEFAULT_THEME,
+    val personality: String = BuildConfig.SHIMI_DEFAULT_PERSONALITY,
     val backgroundAssistantEnabled: Boolean = false,
     val aiMode: String = "auto",
     val cloudGeminiEnabled: Boolean = true,
+    val offlineOnly: Boolean = false,
     val confirmConsequentialActions: Boolean = true,
     val floatingMode: String = "overlay",
     val floatingSize: String = "medium",
@@ -114,16 +125,8 @@ data class ActionResult(
     val message: String,
     val requiresConfirmation: Boolean = false,
     val confirmationId: String? = null,
-    val executedLocally: Boolean = true
-)
-
-@Serializable
-data class DebugTracePayload(
-    val stage: String,
-    val summary: String,
-    val detail: String = "",
-    val status: String = "info",
-    val durationMs: Long? = null
+    val executedLocally: Boolean = true,
+    val disambiguationOptions: List<String> = emptyList()
 )
 
 @Serializable
@@ -133,8 +136,9 @@ data class InstalledAppRecord(
 )
 
 @Serializable
-data class NativeBridgeEventPayload(
-    val type: String,
-    val timestamp: Long = System.currentTimeMillis(),
-    val payload: Map<String, String> = emptyMap()
+data class SelfTestCheck(
+    val id: String,
+    val label: String,
+    val ok: Boolean,
+    val detail: String
 )

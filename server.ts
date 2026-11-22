@@ -4,12 +4,46 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  isValidGithubRef,
+  isValidGithubRepo,
+  suggestNextVersion,
+  validateApkBuildRequest,
+} from './src/core/apkBuildConfig';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
+const APK_WORKFLOW_FILE = 'build-apk.yml';
+const GITHUB_API_BASE = 'https://api.github.com';
+
+interface GithubCiConfig {
+  repo: string;
+  token: string;
+  ref: string;
+}
+
+function getGithubCiConfig(): GithubCiConfig | null {
+  const repo = process.env.GITHUB_REPO?.trim();
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const ref = process.env.GITHUB_REF?.trim() || 'main';
+  if (!isValidGithubRepo(repo) || !token || token === 'MY_GITHUB_TOKEN') {
+    return null;
+  }
+  const safeRef = isValidGithubRef(ref) ? ref : 'main';
+  return { repo, token, ref: safeRef };
+}
+
+function buildGithubHeaders(token: string): Record<string, string> {
+  return {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'shimi-apk-ci-server',
+  };
+}
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -117,6 +151,46 @@ const INTERPRETATION_SCHEMA = {
   ],
 };
 
+async function fetchLatestGithubApk(ci: GithubCiConfig) {
+  const relRes = await fetch(`${GITHUB_API_BASE}/repos/${ci.repo}/releases?per_page=10`, {
+    headers: buildGithubHeaders(ci.token),
+  });
+  if (!relRes.ok) return null;
+  const releases = (await relRes.json()) as Array<{
+    tag_name?: string;
+    published_at?: string;
+    html_url?: string;
+    assets?: Array<{
+      name?: string;
+      browser_download_url?: string;
+      size?: number;
+    }>;
+  }>;
+  if (!Array.isArray(releases)) return null;
+
+  for (const rel of releases) {
+    const apkAsset = rel.assets?.find(
+      (a) => typeof a.name === 'string' && a.name.toLowerCase().endsWith('.apk') && (a.size ?? 0) > 0
+    );
+    if (apkAsset && apkAsset.name && apkAsset.browser_download_url) {
+      const versionMatch = apkAsset.name.match(/v(\d+\.\d+\.\d+)/i);
+      const versionName =
+        versionMatch?.[1] || (rel.tag_name ?? '2.1.0').replace(/^v/i, '').split('-')[0];
+      return {
+        tagName: rel.tag_name ?? `v${versionName}`,
+        versionName,
+        fileName: apkAsset.name,
+        downloadUrl: apkAsset.browser_download_url,
+        publishedAt: rel.published_at ?? new Date().toISOString(),
+        sizeBytes: apkAsset.size,
+        signed: !apkAsset.name.toLowerCase().includes('unsigned'),
+        releaseUrl: rel.html_url ?? `https://github.com/${ci.repo}/releases`,
+      };
+    }
+  }
+  return null;
+}
+
 async function createServer() {
   const app = express();
   app.use(express.json({ limit: '6mb' }));
@@ -125,6 +199,7 @@ async function createServer() {
     res.json({
       ok: true,
       geminiConfigured: Boolean(getGeminiClient()),
+      apkCiConfigured: Boolean(getGithubCiConfig()),
       persistence: 'ephemeral_none',
     });
   });
@@ -136,6 +211,252 @@ async function createServer() {
       res.json({ count: files.length, files });
     } catch {
       res.status(500).json({ error: 'READ_FAILED', files: [] });
+    }
+  });
+
+  // Real GitHub Actions Android CI status + latest compiled APK release lookup
+  app.get('/api/apk/status', async (_req, res) => {
+    const ci = getGithubCiConfig();
+    if (!ci) {
+      res.json({
+        ciConfigured: false,
+        repo: null,
+        branch: 'main',
+        workflowFile: `.github/workflows/${APK_WORKFLOW_FILE}`,
+        latestApk: null,
+        recentRuns: [],
+        suggestedVersion: '2.1.0',
+        message:
+          'APK cloud build server is not connected yet. Configure GITHUB_REPO and GITHUB_TOKEN in server environment variables to trigger real GitHub Actions Android builds.',
+      });
+      return;
+    }
+
+    try {
+      const [latestApk, runsRes] = await Promise.all([
+        fetchLatestGithubApk(ci),
+        fetch(
+          `${GITHUB_API_BASE}/repos/${ci.repo}/actions/workflows/${APK_WORKFLOW_FILE}/runs?per_page=5`,
+          { headers: buildGithubHeaders(ci.token) }
+        ),
+      ]);
+
+      let recentRuns: Array<{
+        id: number;
+        status: string;
+        conclusion: string | null;
+        htmlUrl: string;
+        createdAt: string;
+        updatedAt: string;
+        displayTitle?: string;
+      }> = [];
+
+      if (runsRes.ok) {
+        const runsJson = (await runsRes.json()) as {
+          workflow_runs?: Array<{
+            id: number;
+            status?: string;
+            conclusion?: string | null;
+            html_url?: string;
+            created_at?: string;
+            updated_at?: string;
+            display_title?: string;
+          }>;
+        };
+        recentRuns = (runsJson.workflow_runs ?? []).map((r) => ({
+          id: r.id,
+          status: r.status ?? 'queued',
+          conclusion: r.conclusion ?? null,
+          htmlUrl: r.html_url ?? `https://github.com/${ci.repo}/actions`,
+          createdAt: r.created_at ?? '',
+          updatedAt: r.updated_at ?? '',
+          displayTitle: r.display_title,
+        }));
+      }
+
+      res.json({
+        ciConfigured: true,
+        repo: ci.repo,
+        branch: ci.ref,
+        workflowFile: `.github/workflows/${APK_WORKFLOW_FILE}`,
+        latestApk,
+        recentRuns,
+        suggestedVersion: suggestNextVersion(latestApk?.versionName),
+      });
+    } catch {
+      res.status(502).json({
+        ciConfigured: true,
+        repo: ci.repo,
+        branch: ci.ref,
+        workflowFile: `.github/workflows/${APK_WORKFLOW_FILE}`,
+        latestApk: null,
+        recentRuns: [],
+        suggestedVersion: '2.1.0',
+        message: 'Could not reach GitHub Actions API right now. Please retry shortly.',
+      });
+    }
+  });
+
+  // Dispatches a real GitHub Actions Android APK build workflow with personalized BuildConfig defaults
+  app.post('/api/apk/build', async (req, res) => {
+    const validation = validateApkBuildRequest(req.body ?? {});
+    if (!validation.valid || !validation.normalized) {
+      res.status(400).json({
+        error: 'INVALID_APK_CONFIG',
+        message: validation.errors.join(' '),
+        errors: validation.errors,
+      });
+      return;
+    }
+
+    const ci = getGithubCiConfig();
+    if (!ci) {
+      res.status(503).json({
+        error: 'APK_CI_NOT_CONFIGURED',
+        message:
+          'This server does not have GITHUB_REPO and GITHUB_TOKEN configured, so it cannot trigger a real Android Gradle build. Push this repository to GitHub and configure GITHUB_REPO + GITHUB_TOKEN (with actions:write) to build installable APKs via .github/workflows/build-apk.yml.',
+      });
+      return;
+    }
+
+    const cfg = validation.normalized;
+    const pwaUrl = process.env.APP_URL?.trim() && process.env.APP_URL !== 'MY_APP_URL'
+      ? process.env.APP_URL.trim()
+      : '';
+
+    try {
+      const dispatchRes = await fetch(
+        `${GITHUB_API_BASE}/repos/${ci.repo}/actions/workflows/${APK_WORKFLOW_FILE}/dispatches`,
+        {
+          method: 'POST',
+          headers: {
+            ...buildGithubHeaders(ci.token),
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ref: ci.ref,
+            inputs: {
+              assistantName: cfg.assistantName,
+              wakeWord: cfg.wakeWord,
+              robotStyle: cfg.robotStyle,
+              accessory: cfg.accessory,
+              personality: cfg.personality,
+              theme: cfg.themeId,
+              versionName: cfg.versionName,
+              pwaUrl,
+              apiBaseUrl: pwaUrl,
+            },
+          }),
+        }
+      );
+
+      if (!dispatchRes.ok) {
+        const errText = (await dispatchRes.text()).slice(0, 300);
+        res.status(502).json({
+          error: 'GITHUB_DISPATCH_FAILED',
+          message: `GitHub Actions rejected the workflow dispatch (HTTP ${dispatchRes.status}). ${errText}`,
+        });
+        return;
+      }
+
+      // Briefly look up the newest workflow run ID so the client can poll real build progress
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      let latestRun = null;
+      const runsRes = await fetch(
+        `${GITHUB_API_BASE}/repos/${ci.repo}/actions/workflows/${APK_WORKFLOW_FILE}/runs?per_page=1`,
+        { headers: buildGithubHeaders(ci.token) }
+      );
+      if (runsRes.ok) {
+        const runsJson = (await runsRes.json()) as {
+          workflow_runs?: Array<{
+            id: number;
+            status?: string;
+            conclusion?: string | null;
+            html_url?: string;
+            created_at?: string;
+            updated_at?: string;
+          }>;
+        };
+        const r = runsJson.workflow_runs?.[0];
+        if (r) {
+          latestRun = {
+            id: r.id,
+            status: r.status ?? 'queued',
+            conclusion: r.conclusion ?? null,
+            htmlUrl: r.html_url ?? `https://github.com/${ci.repo}/actions`,
+            createdAt: r.created_at ?? '',
+            updatedAt: r.updated_at ?? '',
+          };
+        }
+      }
+
+      res.status(202).json({
+        ok: true,
+        status: latestRun?.status ?? 'queued',
+        run: latestRun,
+        config: cfg,
+        actionsUrl: `https://github.com/${ci.repo}/actions/workflows/${APK_WORKFLOW_FILE}`,
+      });
+    } catch {
+      res.status(502).json({
+        error: 'APK_DISPATCH_NETWORK_ERROR',
+        message: 'Network error while dispatching GitHub Actions APK build.',
+      });
+    }
+  });
+
+  // Polls real GitHub Actions build status for a dispatched run ID
+  app.get('/api/apk/runs/:runId', async (req, res) => {
+    const ci = getGithubCiConfig();
+    if (!ci) {
+      res.status(503).json({ error: 'APK_CI_NOT_CONFIGURED', message: 'GitHub CI not configured.' });
+      return;
+    }
+
+    const runIdRaw = req.params.runId;
+    if (!/^\d{1,20}$/.test(runIdRaw)) {
+      res.status(400).json({ error: 'INVALID_RUN_ID', message: 'Run ID must be numeric.' });
+      return;
+    }
+
+    try {
+      const runRes = await fetch(`${GITHUB_API_BASE}/repos/${ci.repo}/actions/runs/${runIdRaw}`, {
+        headers: buildGithubHeaders(ci.token),
+      });
+      if (!runRes.ok) {
+        res.status(runRes.status).json({
+          error: 'GITHUB_RUN_LOOKUP_FAILED',
+          message: `Could not read workflow run #${runIdRaw}.`,
+        });
+        return;
+      }
+
+      const r = (await runRes.json()) as {
+        id: number;
+        status?: string;
+        conclusion?: string | null;
+        html_url?: string;
+        created_at?: string;
+        updated_at?: string;
+      };
+
+      const latestApk = r.status === 'completed' && r.conclusion === 'success'
+        ? await fetchLatestGithubApk(ci)
+        : null;
+
+      res.json({
+        run: {
+          id: r.id,
+          status: r.status ?? 'queued',
+          conclusion: r.conclusion ?? null,
+          htmlUrl: r.html_url ?? `https://github.com/${ci.repo}/actions`,
+          createdAt: r.created_at ?? '',
+          updatedAt: r.updated_at ?? '',
+        },
+        latestApk,
+      });
+    } catch {
+      res.status(502).json({ error: 'RUN_POLL_FAILED', message: 'Failed to poll GitHub Actions run.' });
     }
   });
 
@@ -338,9 +659,65 @@ Rules:
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: false,
+      },
       appType: 'spa',
     });
+
+    // Vite 8 still injects /@vite/client with a port-24678 WebSocket attempt even when
+    // hmr/ws are disabled. Serve a WebSocket-free shim providing Vite's exact CSS/HMR exports.
+    const NO_WS_VITE_CLIENT = `
+const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  return {
+    data: {},
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    decline() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (!url || (url[0] !== '.' && url[0] !== '/')) return url;
+  const pathname = url.replace(/[?#].*$/, '');
+  const { search, hash } = new URL(url, 'http://vite.dev');
+  return \`\${pathname}?\${queryToInject}\${search ? '&' + search.slice(1) : ''}\${hash || ''}\`;
+}
+export class ErrorOverlay extends (globalThis.HTMLElement || class {}) {}
+`;
+
+    app.get('/@vite/client', (_req, res) => {
+      res.type('application/javascript').set('Cache-Control', 'no-store').send(NO_WS_VITE_CLIENT);
+    });
+
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');

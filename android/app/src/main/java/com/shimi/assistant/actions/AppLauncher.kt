@@ -8,8 +8,9 @@ import com.shimi.assistant.data.InstalledAppRecord
 import java.util.Locale
 
 /**
- * Dynamically discovers installed launcher apps via PackageManager (respecting Android 11+ `<queries>`)
- * with an in-memory cache and friendly alias normalization.
+ * Dynamically discovers installed launcher apps via PackageManager (respecting Android 11+ `<queries>`).
+ * Supports fuzzy matching, common aliases, and honest multi-match disambiguation
+ * (e.g., "I found two calculator apps: Calculator and Scientific Calculator. Which one?").
  */
 class AppLauncher(private val context: Context) {
 
@@ -26,8 +27,7 @@ class AppLauncher(private val context: Context) {
         "google maps" to "maps",
         "browser" to "chrome",
         "mail" to "gmail",
-        "clock" to "clock",
-        "settings" to "settings",
+        "my calculator" to "calculator",
         "gallery" to "photos"
     )
 
@@ -51,28 +51,46 @@ class AppLauncher(private val context: Context) {
     }
 
     fun launchByName(rawName: String): ActionResult {
-        val query = rawName.trim().lowercase(Locale.getDefault())
-        if (query.isBlank()) {
+        val cleaned = rawName.trim().removePrefix("my ").trim().lowercase(Locale.getDefault())
+        if (cleaned.isBlank()) {
             return ActionResult(false, "error", "Please tell me which app to open.")
         }
-        val normalized = aliases[query] ?: query
+        val normalized = aliases[cleaned] ?: cleaned
         val apps = listInstalledApps()
 
-        val exact = apps.firstOrNull { it.label.equals(normalized, ignoreCase = true) }
-        val startsWith = exact ?: apps.firstOrNull {
-            it.label.lowercase(Locale.getDefault()).startsWith(normalized)
-        }
-        val contains = startsWith ?: apps.firstOrNull {
-            it.label.lowercase(Locale.getDefault()).contains(normalized) ||
-                it.packageName.lowercase(Locale.getDefault()).contains(normalized)
+        val exactMatches = apps.filter { it.label.equals(normalized, ignoreCase = true) }
+        val candidates = when {
+            exactMatches.size == 1 -> exactMatches
+            exactMatches.size > 1 -> exactMatches
+            else -> {
+                val prefix = apps.filter { it.label.lowercase(Locale.getDefault()).startsWith(normalized) }
+                if (prefix.isNotEmpty()) prefix
+                else apps.filter {
+                    it.label.lowercase(Locale.getDefault()).contains(normalized) ||
+                        it.packageName.lowercase(Locale.getDefault()).contains(normalized)
+                }
+            }
         }
 
-        val target = contains ?: return ActionResult(
-            ok = false,
-            status = "error",
-            message = "I couldn't find an installed app named \"$rawName\" on this device."
-        )
+        if (candidates.isEmpty()) {
+            return ActionResult(
+                ok = false,
+                status = "error",
+                message = "I couldn't find an installed app named \"$rawName\" on this phone."
+            )
+        }
 
+        if (candidates.size > 1 && exactMatches.size != 1) {
+            val labels = candidates.take(4).map { it.label }
+            return ActionResult(
+                ok = false,
+                status = "disambiguate",
+                message = "I found ${candidates.size} matching apps: ${labels.joinToString(", ")}. Which one should I open?",
+                disambiguationOptions = labels
+            )
+        }
+
+        val target = candidates.first()
         val launchIntent = context.packageManager.getLaunchIntentForPackage(target.packageName)
             ?: return ActionResult(
                 ok = false,

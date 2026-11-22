@@ -24,6 +24,7 @@ import type {
   DebugTraceEntry,
   NativeServiceSnapshot,
   RobotState,
+  TaskPlanPreview,
 } from '../core/types';
 
 interface DashboardViewProps {
@@ -43,6 +44,7 @@ interface DashboardViewProps {
   actionLog: ActionExecutionRecord[];
   nativeSnapshot: NativeServiceSnapshot;
   debugTraces: DebugTraceEntry[];
+  activeTaskPlan?: TaskPlanPreview | null;
   onClearDebugTraces: () => void;
   onStartSession: () => void;
   onStopSession: () => void;
@@ -108,6 +110,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   actionLog,
   nativeSnapshot,
   debugTraces,
+  activeTaskPlan,
   onClearDebugTraces,
   onStartSession,
   onStopSession,
@@ -530,6 +533,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {preferences.debugModeEnabled && (
         <DebugPipelinePanel
           traces={debugTraces}
+          activeTaskPlan={activeTaskPlan}
           nativeConnected={nativeSnapshot.connected}
           serviceRunning={nativeSnapshot.serviceRunning}
           wakeWord={preferences.wakeWord}

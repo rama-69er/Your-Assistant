@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Lock, Palette, Play, Shield, Sparkles, Square } from 'lucide-react';
+import { Download, Lock, Palette, Play, Shield, Sparkles, Square } from 'lucide-react';
 import { CameraModal } from './components/CameraModal';
 import { CustomizeView } from './components/CustomizeView';
 import { DashboardView } from './components/DashboardView';
+import { DownloadApkView } from './components/DownloadApkView';
 import { FloatingRobotOverlay } from './components/FloatingRobotOverlay';
 import { OnboardingView } from './components/OnboardingView';
 import { PermissionsView } from './components/PermissionsView';
@@ -10,6 +11,7 @@ import { PhotoPickerModal } from './components/PhotoPickerModal';
 import { PrivacySettingsView } from './components/PrivacySettingsView';
 import { OfflineIndicator } from './components/PWAInstallButton';
 import { computeNextAutoState, DEFAULT_PREFERENCES } from './core/robotStateMachine';
+import { planMultiStepTask } from './core/taskPlanner';
 import type {
   ActionExecutionRecord,
   ActiveTab,
@@ -21,6 +23,7 @@ import type {
   PermissionKey,
   PermissionStatusMap,
   RobotState,
+  TaskPlanPreview,
 } from './core/types';
 import { dispatchShimiAction } from './services/actionDispatcher';
 import { fetchServerHealth, interpretCommand } from './services/geminiService';
@@ -48,10 +51,18 @@ function readAutostartParam(): boolean {
 export default function App() {
   const [preferences, setPreferences] = useState<AssistantPreferences>(() => {
     const stored = loadPreferences();
-    if (readAutostartParam() && !stored.onboardingCompleted) {
-      return { ...stored, onboardingCompleted: true };
+    const nativeCfg = nativeBridge.getNativeConfig();
+    const merged: AssistantPreferences = nativeCfg
+      ? {
+          ...stored,
+          ...nativeCfg,
+          onboardingCompleted: true,
+        }
+      : stored;
+    if (readAutostartParam() && !merged.onboardingCompleted) {
+      return { ...merged, onboardingCompleted: true };
     }
-    return stored;
+    return merged;
   });
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
@@ -78,6 +89,7 @@ export default function App() {
   const [conversation, setConversation] = useState<ConversationTurn[]>([]);
   const [actionLog, setActionLog] = useState<ActionExecutionRecord[]>([]);
   const [debugTraces, setDebugTraces] = useState<DebugTraceEntry[]>([]);
+  const [activeTaskPlan, setActiveTaskPlan] = useState<TaskPlanPreview | null>(null);
 
   // Active interactive task modals
   const [cameraModal, setCameraModal] = useState<{ open: boolean; timerSeconds?: number }>({
@@ -366,6 +378,17 @@ export default function App() {
           pushDebugTrace('INTENT', 'Cloud Gemini fallback triggered', errMsg, false);
         }
 
+        const plannedTask = planMultiStepTask(utterance, preferences.confirmConsequentialActions);
+        setActiveTaskPlan(plannedTask);
+        if (plannedTask) {
+          pushDebugTrace(
+            'EXECUTOR',
+            `Compiled ${plannedTask.steps.length}-step task plan: ${plannedTask.title}`,
+            plannedTask.steps.map((s) => `${s.index}.${s.type}`).join(' -> '),
+            true
+          );
+        }
+
         const execStart = performance.now();
         const executionRecord = dispatchShimiAction(
           utterance,
@@ -609,6 +632,18 @@ export default function App() {
             : item
         )
       );
+      setActiveTaskPlan((prev) =>
+        prev
+          ? {
+              ...prev,
+              steps: prev.steps.map((s) =>
+                s.status === 'WAITING_CONFIRMATION' || s.status === 'PENDING'
+                  ? { ...s, status: 'COMPLETED' }
+                  : s
+              ),
+            }
+          : null
+      );
       pushDebugTrace('RESULT', 'User confirmed consequential action', actionId, true);
       setRobotState('SUCCESS');
       setLatestBubble('Confirmed! Proceeding with your action.');
@@ -632,6 +667,18 @@ export default function App() {
               }
             : item
         )
+      );
+      setActiveTaskPlan((prev) =>
+        prev
+          ? {
+              ...prev,
+              steps: prev.steps.map((s) =>
+                s.status === 'WAITING_CONFIRMATION' || s.status === 'PENDING'
+                  ? { ...s, status: 'CANCELLED' }
+                  : s
+              ),
+            }
+          : null
       );
       pushDebugTrace('RESULT', 'User cancelled consequential action', actionId, true);
       setRobotState('IDLE');
@@ -700,6 +747,7 @@ export default function App() {
     { id: 'customize', label: 'Customize', icon: <Palette className="w-5 h-5" /> },
     { id: 'permissions', label: 'Permissions', icon: <Shield className="w-5 h-5" /> },
     { id: 'privacy', label: 'Privacy', icon: <Lock className="w-5 h-5" /> },
+    { id: 'apk', label: 'Download APK', icon: <Download className="w-5 h-5" /> },
   ];
 
   return (
@@ -791,7 +839,11 @@ export default function App() {
             actionLog={actionLog}
             nativeSnapshot={nativeSnapshot}
             debugTraces={debugTraces}
-            onClearDebugTraces={() => setDebugTraces([])}
+            activeTaskPlan={activeTaskPlan}
+            onClearDebugTraces={() => {
+              setDebugTraces([]);
+              setActiveTaskPlan(null);
+            }}
             onStartSession={handleStartSession}
             onStopSession={handleStopSession}
             onTogglePause={handleTogglePause}
@@ -841,12 +893,20 @@ export default function App() {
             onClearAllAndReset={handleClearAllAndReset}
           />
         )}
+
+        {activeTab === 'apk' && (
+          <DownloadApkView
+            preferences={preferences}
+            nativeConnected={nativeSnapshot.connected}
+            onApplyConfigToLocal={updatePreferences}
+          />
+        )}
       </main>
 
       {/* Mobile Fixed Bottom Tab Bar (60px height; total sticky 112px <= 15% of 844px) */}
       <nav
         aria-label="Mobile navigation"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-[60px] bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-4 items-center"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-[60px] bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center"
       >
         {navItems.map((item) => {
           const active = activeTab === item.id;

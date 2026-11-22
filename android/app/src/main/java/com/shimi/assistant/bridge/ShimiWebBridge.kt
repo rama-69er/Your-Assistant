@@ -14,7 +14,8 @@ import org.json.JSONObject
 
 /**
  * Bidirectional JS <-> Kotlin bridge exposed to the Shimi PWA as `window.ShimiNative`.
- * Method names and JSON keys match `ShimiAndroidJavascriptInterface` in `src/services/nativeBridge.ts` 1:1.
+ * Synchronizes the shared versioned AssistantConfig (including BuildConfig personalized APK defaults),
+ * live service snapshots, multi-step task confirmations, and real device self-tests.
  */
 class ShimiWebBridge(
     private val webView: WebView,
@@ -40,22 +41,62 @@ class ShimiWebBridge(
         return state.toString()
     }
 
+    /**
+     * Exposes the native AssistantConfig (initialized from BuildConfig.SHIMI_DEFAULT_* on first launch)
+     * so a personalized APK opens immediately with the user's chosen name, wake word, style, accessory,
+     * personality, and theme already active in the WebView UI.
+     */
+    @JavascriptInterface
+    fun getAssistantConfigJson(): String {
+        val c = settingsRepository.load()
+        return JSONObject()
+            .put("schemaVersion", c.schemaVersion)
+            .put("name", c.name)
+            .put("wakeWord", c.wakeWord)
+            .put("wakeWordEnabled", c.wakeWordEnabled)
+            .put("wakeWordSensitivity", c.wakeWordSensitivity)
+            .put("robotStyle", c.robotStyle)
+            .put("accessory", c.accessory)
+            .put("themeId", c.themeId)
+            .put("personality", c.personality)
+            .put("backgroundAssistantEnabled", c.backgroundAssistantEnabled)
+            .put("aiMode", c.aiMode)
+            .put("cloudGeminiEnabled", c.cloudGeminiEnabled)
+            .put("offlineOnly", c.offlineOnly)
+            .put("confirmConsequentialActions", c.confirmConsequentialActions)
+            .put("floatingMode", c.floatingMode)
+            .put("floatingSize", c.floatingSize)
+            .put("floatingOpacity", c.floatingOpacity.toDouble())
+            .put("voiceOutputMode", c.voiceOutputMode)
+            .put("batterySaver", c.batterySaver)
+            .put("debugModeEnabled", c.debugModeEnabled)
+            .toString()
+    }
+
     @JavascriptInterface
     fun syncSettingsJson(settingsJson: String) {
         runCatching {
             val json = JSONObject(settingsJson)
             val current = settingsRepository.load()
+            val aiMode = json.optString("aiMode", current.aiMode)
+            val offlineOnly = json.optBoolean("offlineOnly", aiMode == "offline_only")
             val updated = AssistantConfig(
+                schemaVersion = json.optInt("schemaVersion", 2),
                 name = json.optString("name", current.name).ifBlank { current.name },
                 wakeWord = json.optString("wakeWord", current.wakeWord).ifBlank { current.wakeWord },
                 wakeWordEnabled = json.optBoolean("wakeWordEnabled", current.wakeWordEnabled),
                 wakeWordSensitivity = json.optString("wakeWordSensitivity", current.wakeWordSensitivity),
+                robotStyle = json.optString("robotStyle", current.robotStyle),
+                accessory = json.optString("accessory", current.accessory),
+                themeId = json.optString("themeId", current.themeId),
+                personality = json.optString("personality", current.personality),
                 backgroundAssistantEnabled = json.optBoolean(
                     "backgroundAssistantEnabled",
                     current.backgroundAssistantEnabled
                 ),
-                aiMode = json.optString("aiMode", current.aiMode),
-                cloudGeminiEnabled = json.optBoolean("cloudGeminiEnabled", current.cloudGeminiEnabled),
+                aiMode = if (offlineOnly) "offline_only" else aiMode,
+                cloudGeminiEnabled = !offlineOnly && json.optBoolean("cloudGeminiEnabled", current.cloudGeminiEnabled),
+                offlineOnly = offlineOnly,
                 confirmConsequentialActions = json.optBoolean(
                     "confirmConsequentialActions",
                     current.confirmConsequentialActions
@@ -151,6 +192,9 @@ class ShimiWebBridge(
             .put("message", "Opened Android battery optimization settings.")
             .toString()
     }
+
+    @JavascriptInterface
+    fun runSelfTestJson(): String = AssistantEngine.selfTestJson()
 
     @JavascriptInterface
     fun getInstalledAppsJson(): String {

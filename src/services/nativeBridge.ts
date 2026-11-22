@@ -4,6 +4,7 @@ import type {
   InstalledAppInfo,
   NativeBridgeEvent,
   NativeServiceSnapshot,
+  SelfTestCheckItem,
   SettingsTarget,
   ShimiInterpretation,
 } from '../core/types';
@@ -13,6 +14,7 @@ import type {
  */
 export interface ShimiAndroidJavascriptInterface {
   getSnapshotJson: () => string;
+  getAssistantConfigJson?: () => string;
   syncSettingsJson: (settingsJson: string) => void;
   setBackgroundAssistantEnabled: (enabled: boolean) => string;
   startListening: () => string;
@@ -24,6 +26,7 @@ export interface ShimiAndroidJavascriptInterface {
   requestBatteryOptimizationExemption: () => string;
   getInstalledAppsJson: () => string;
   getDebugLogsJson: () => string;
+  runSelfTestJson?: () => string;
 }
 
 declare global {
@@ -230,6 +233,72 @@ export class ShimiNativeBridge {
       ok: true,
       message: 'Opened Android battery optimization settings.',
     });
+  }
+
+  getNativeConfig(): Partial<AssistantPreferences> | null {
+    const api = this.getNative();
+    if (!api || typeof api.getAssistantConfigJson !== 'function') return null;
+    const raw = safeJsonParse<Record<string, unknown> | null>(api.getAssistantConfigJson(), null);
+    if (!raw) return null;
+
+    const patch: Partial<AssistantPreferences> = {};
+    if (typeof raw.assistantName === 'string' && raw.assistantName.trim()) {
+      patch.name = raw.assistantName.trim();
+    } else if (typeof raw.name === 'string' && raw.name.trim()) {
+      patch.name = raw.name.trim();
+    }
+    if (typeof raw.wakeWord === 'string' && raw.wakeWord.trim()) {
+      patch.wakeWord = raw.wakeWord.trim();
+    }
+    if (raw.robotStyle === 'pod' || raw.robotStyle === 'aero' || raw.robotStyle === 'deskbot') {
+      patch.robotStyle = raw.robotStyle;
+    }
+    if (
+      raw.accessory === 'none' ||
+      raw.accessory === 'halo' ||
+      raw.accessory === 'beanie' ||
+      raw.accessory === 'glasses' ||
+      raw.accessory === 'headphones' ||
+      raw.accessory === 'star'
+    ) {
+      patch.accessory = raw.accessory;
+    }
+    if (raw.personality === 'warm' || raw.personality === 'playful' || raw.personality === 'calm') {
+      patch.personality = raw.personality;
+    }
+    if (typeof raw.themeId === 'string' && raw.themeId.trim()) {
+      patch.themeId = raw.themeId.trim();
+    }
+    if (typeof raw.wakeWordEnabled === 'boolean') {
+      patch.wakeWordEnabled = raw.wakeWordEnabled;
+    }
+    if (typeof raw.backgroundAssistantEnabled === 'boolean') {
+      patch.backgroundAssistantEnabled = raw.backgroundAssistantEnabled;
+    }
+    if (typeof raw.confirmConsequentialActions === 'boolean') {
+      patch.confirmConsequentialActions = raw.confirmConsequentialActions;
+    }
+    if (raw.aiMode === 'auto' || raw.aiMode === 'offline_only') {
+      patch.aiMode = raw.aiMode;
+    }
+    return patch;
+  }
+
+  runSelfTest(): SelfTestCheckItem[] | null {
+    const api = this.getNative();
+    if (!api || typeof api.runSelfTestJson !== 'function') return null;
+    const raw = safeJsonParse<Array<{ id?: string; label?: string; passed?: boolean; detail?: string }>>(
+      api.runSelfTestJson(),
+      []
+    );
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    return raw.map((item, idx) => ({
+      id: typeof item.id === 'string' ? item.id : `native_check_${idx}`,
+      label: typeof item.label === 'string' ? item.label : `Check ${idx + 1}`,
+      passed: Boolean(item.passed),
+      detail: typeof item.detail === 'string' ? item.detail : '',
+      scope: 'native' as const,
+    }));
   }
 
   getInstalledApps(): InstalledAppInfo[] {

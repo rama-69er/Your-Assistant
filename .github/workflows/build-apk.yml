@@ -1,0 +1,164 @@
+name: Build Personalized Shimi Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      assistantName:
+        description: "Default assistant name & launcher label (e.g. Milo)"
+        required: true
+        default: "Shimi"
+      wakeWord:
+        description: "Default offline wake word (e.g. Milo)"
+        required: true
+        default: "Shimi"
+      robotStyle:
+        description: "Robot style: pod | aero | deskbot"
+        required: true
+        default: "pod"
+      accessory:
+        description: "Accessory: none | halo | beanie | glasses | headphones | star"
+        required: true
+        default: "none"
+      personality:
+        description: "Personality: warm | playful | calm"
+        required: true
+        default: "warm"
+      theme:
+        description: "Theme ID: ceramic-cobalt | sage-emerald | sand-coral | slate-amber | mist-indigo"
+        required: true
+        default: "ceramic-cobalt"
+      versionName:
+        description: "Semantic version name (e.g. 2.1.0)"
+        required: true
+        default: "2.1.0"
+      pwaUrl:
+        description: "Hosted Shimi PWA URL loaded by Android WebView"
+        required: false
+        default: "http://10.0.2.2:3000"
+      apiBaseUrl:
+        description: "Hosted Shimi API base URL for optional online Gemini calls"
+        required: false
+        default: "http://10.0.2.2:3000"
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Compute deterministic APK filename & versionCode
+        id: meta
+        shell: bash
+        env:
+          RAW_NAME: ${{ inputs.assistantName }}
+          RAW_VERSION: ${{ inputs.versionName }}
+        run: |
+          SLUG=$(echo "$RAW_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')
+          if [ -z "$SLUG" ]; then SLUG="shimi"; fi
+          SAFE_VER=$(echo "$RAW_VERSION" | sed -E 's/[^0-9A-Za-z._-]+//g')
+          if [ -z "$SAFE_VER" ]; then SAFE_VER="2.1.0"; fi
+          VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+          echo "version_name=$SAFE_VER" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Decode Android release keystore (when CI signing secrets are configured)
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > /tmp/shimi-release.jks
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "ANDROID_KEYSTORE_PATH=/tmp/shimi-release.jks" >> "$GITHUB_ENV"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No signing secrets configured — building clearly labeled unsigned/debug APK."
+          fi
+
+      - name: Build Android APK with injected personalized BuildConfig defaults
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          GRADLE_TASK="assembleDebug"
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            GRADLE_TASK="assembleRelease"
+          fi
+          gradle "$GRADLE_TASK" \
+            -PSHIMI_DEFAULT_NAME="${{ inputs.assistantName }}" \
+            -PSHIMI_DEFAULT_WAKE_WORD="${{ inputs.wakeWord }}" \
+            -PSHIMI_DEFAULT_STYLE="${{ inputs.robotStyle }}" \
+            -PSHIMI_DEFAULT_ACCESSORY="${{ inputs.accessory }}" \
+            -PSHIMI_DEFAULT_PERSONALITY="${{ inputs.personality }}" \
+            -PSHIMI_DEFAULT_THEME="${{ inputs.theme }}" \
+            -PSHIMI_VERSION_NAME="${{ steps.meta.outputs.version_name }}" \
+            -PSHIMI_VERSION_CODE="${{ steps.meta.outputs.version_code }}" \
+            -PSHIMI_PWA_URL="${{ inputs.pwaUrl }}" \
+            -PSHIMI_API_BASE_URL="${{ inputs.apiBaseUrl }}"
+
+      - name: Verify APK exists and prepare deterministic filename
+        id: apk
+        shell: bash
+        run: |
+          mkdir -p dist-apk
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            SRC="android/app/build/outputs/apk/release/app-release.apk"
+            OUT="dist-apk/shimi-${{ steps.meta.outputs.slug }}-v${{ steps.meta.outputs.version_name }}.apk"
+          else
+            SRC="android/app/build/outputs/apk/debug/app-debug.apk"
+            OUT="dist-apk/shimi-${{ steps.meta.outputs.slug }}-v${{ steps.meta.outputs.version_name }}-unsigned-debug.apk"
+          fi
+          test -s "$SRC"
+          cp "$SRC" "$OUT"
+          ls -lh "$OUT"
+          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$(basename "$OUT")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.apk_name }}
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+
+      - name: Publish downloadable GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-v${{ steps.meta.outputs.version_name }}-b${{ steps.meta.outputs.version_code }}
+          name: "${{ inputs.assistantName }} Android APK v${{ steps.meta.outputs.version_name }} (${{ steps.signing.outputs.signed == 'true' && 'Signed Release' || 'Unsigned Debug Build' }})"
+          body: |
+            - Assistant name: `${{ inputs.assistantName }}`
+            - Default wake word: `${{ inputs.wakeWord }}`
+            - Robot style: `${{ inputs.robotStyle }}`
+            - Accessory: `${{ inputs.accessory }}`
+            - Personality: `${{ inputs.personality }}`
+            - Theme: `${{ inputs.theme }}`
+            - Version: `${{ steps.meta.outputs.version_name }}` (versionCode `${{ steps.meta.outputs.version_code }}`)
+            - Signing: `${{ steps.signing.outputs.signed == 'true' && 'Signed Release APK' || 'Unsigned Debug APK (configure signing secrets for production release)' }}`
+          prerelease: ${{ steps.signing.outputs.signed != 'true' }}
+          files: ${{ steps.apk.outputs.apk_path }}

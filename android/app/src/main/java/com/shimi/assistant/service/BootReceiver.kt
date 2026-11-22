@@ -50,8 +50,8 @@ class BootReceiver : BroadcastReceiver() {
 
         val notification = NotificationCompat.Builder(context, ShimiApplication.CHANNEL_BOOT_STATUS)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("${config.name} is inactive after reboot")
-            .setContentText("Android 14+ requires a tap to resume microphone listening.")
+            .setContentTitle("${config.name} is ready")
+            .setContentText("Your assistant is ready. Tap to resume background listening.")
             .setAutoCancel(true)
             .setContentIntent(pending)
             .build()

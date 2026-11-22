@@ -48,7 +48,7 @@ class OverlayManager(
             val sizePx = dpToPx(FloatingSize.fromWire(config.floatingSize).sizeDp)
             val view = FloatingAssistantView(context).apply {
                 alpha = config.floatingOpacity.coerceIn(0.45f, 1.0f)
-                setState(state)
+                applyConfig(config, state)
             }
 
             val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -124,7 +124,7 @@ class OverlayManager(
             params.width = sizePx
             params.height = sizePx
             view.alpha = config.floatingOpacity.coerceIn(0.45f, 1.0f)
-            view.setState(state)
+            view.applyConfig(config, state)
             runCatching { windowManager?.updateViewLayout(view, params) }
         }
     }

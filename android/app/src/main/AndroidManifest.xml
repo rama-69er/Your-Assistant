@@ -48,7 +48,7 @@
     <application
         android:name=".ShimiApplication"
         android:allowBackup="false"
-        android:label="@string/app_name"
+        android:label="${appLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.Shimi"
         android:usesCleartextTraffic="true">

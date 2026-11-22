@@ -206,7 +206,95 @@ export interface ConversationTurn {
   timestamp: number;
 }
 
-export type ActiveTab = 'dashboard' | 'customize' | 'permissions' | 'privacy';
+export type ActiveTab = 'dashboard' | 'customize' | 'permissions' | 'privacy' | 'apk';
+
+export type TaskStepType =
+  | 'OPEN_APP'
+  | 'WAIT_FOR_APP'
+  | 'FIND_UI'
+  | 'CLICK'
+  | 'TYPE'
+  | 'SCROLL'
+  | 'CONFIRM'
+  | 'VERIFY';
+
+export type TaskStepStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'WAITING_CONFIRMATION'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export interface TaskStepItem {
+  index: number;
+  type: TaskStepType;
+  description: string;
+  target?: string;
+  value?: string;
+  requiresConfirmation?: boolean;
+  status: TaskStepStatus;
+}
+
+export interface TaskPlanPreview {
+  id: string;
+  title: string;
+  originalUtterance: string;
+  targetAppName: string;
+  requiresAccessibility: boolean;
+  hasConfirmationGate: boolean;
+  steps: TaskStepItem[];
+}
+
+export interface SelfTestCheckItem {
+  id: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+  scope: 'native' | 'web';
+}
+
+export interface ApkBuildRequest {
+  assistantName: string;
+  wakeWord: string;
+  robotStyle: RobotStyle;
+  accessory: RobotAccessory;
+  personality: PersonalityStyle;
+  themeId: string;
+  versionName: string;
+}
+
+export interface ApkReleaseInfo {
+  tagName: string;
+  versionName: string;
+  fileName: string;
+  downloadUrl: string;
+  publishedAt: string;
+  sizeBytes?: number;
+  signed: boolean;
+  releaseUrl: string;
+}
+
+export interface ApkWorkflowRun {
+  id: number;
+  status: 'queued' | 'in_progress' | 'completed' | string;
+  conclusion: string | null;
+  htmlUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  displayTitle?: string;
+}
+
+export interface ApkStatusResponse {
+  ciConfigured: boolean;
+  repo: string | null;
+  branch: string;
+  workflowFile: string;
+  latestApk: ApkReleaseInfo | null;
+  recentRuns: ApkWorkflowRun[];
+  suggestedVersion: string;
+  message?: string;
+}
 
 export interface ScopedPhotoItem {
   id: string;
@@ -246,6 +334,7 @@ export interface NativeServiceSnapshot {
   androidSdkInt?: number;
   serviceRunning: boolean;
   wakeWordActive: boolean;
+  wakeWordProvider?: string;
   listening: boolean;
   speaking: boolean;
   overlayVisible: boolean;

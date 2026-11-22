@@ -1,35 +1,59 @@
 # Shimi Native Android Companion (`/android`)
 
-This directory contains the real, modular **Kotlin + Jetpack Compose / Material 3 + Android Foreground Service** companion application for **Shimi**. It hosts the existing Shimi React/Vite PWA in a `WebView` with a bidirectional `@JavascriptInterface` (`window.ShimiNative`) while keeping wake-word listening, speech recognition, offline-first command execution, TTS, and floating presence running independently in a native Android foreground service even when the PWA UI is minimized or closed.
+This directory contains the native **Kotlin + Android Foreground Service + Accessibility Task Engine** companion application for **Shimi**. It hosts the existing Shimi React/Vite PWA in a `WebView` with a bidirectional `@JavascriptInterface` (`window.ShimiNative`) while keeping wake-word detection, active speech recognition, offline-first command routing, multi-step Accessibility execution, TTS, and floating robot presence running independently in a native Android foreground service even when the PWA UI is minimized or swiped away from Recents.
 
 ---
 
 ## 1. Architecture Overview
 
 - **Layer A — Existing Web/PWA UI (`/src`)**:
-  - Preserves the existing visual design, `RobotCharacter` animations, chat console, onboarding, and customization.
-  - Runs the Offline-First Command Router (`src/core/intentRouter.ts`) and connects to `window.ShimiNative` (`src/services/nativeBridge.ts`).
+  - Preserves the approved visual design, `<RobotCharacter />`, styles, accessories, personality, chat console, onboarding, and customization.
+  - Hydrates personalized APK defaults from `window.ShimiNative.getAssistantConfigJson()` on startup so a custom APK (e.g., `"Milo"`) opens immediately with its baked-in name, wake word, style, and accessory.
+  - Provides the **Download APK** personalized builder tab and **Permissions -> Make Shimi Your Phone Assistant** setup wizard + real **Test Shimi** diagnostics.
 - **Layer B — Native Android Companion (`/android`)**:
-  - `service/ShimiForegroundService.kt`: Android 12–15 `FOREGROUND_SERVICE_MICROPHONE` service with persistent notification (`Listen` + `Stop`).
-  - `engine/WakeWordEngine.kt`: Local energy-gated VAD + offline-preferring custom wake-word detector (zero background cloud audio streaming).
-  - `engine/SpeechEngine.kt` & `engine/TTSManager.kt`: Native Android `SpeechRecognizer` (`EXTRA_PREFER_OFFLINE`) and `TextToSpeech`.
-  - `engine/LocalCommandEngine.kt` & `engine/IntentRouter.kt`: Deterministic offline execution for flashlight, volume, media, alarms, timers, camera, settings, app launching, dialer, contacts, calendar, and accessibility actions.
-  - `engine/GeminiManager.kt`: Calls server-side `/api/shimi/interpret` only for open-ended queries when online (never embeds `GEMINI_API_KEY` in the APK).
-  - `actions/AppLauncher.kt` & `actions/DeviceControlManager.kt`: Dynamic `PackageManager` app discovery + real system APIs.
-  - `actions/ShimiAccessibilityService.kt` & `actions/AccessibilityActionExecutor.kt`: Strictly opt-in UI scrolling, back/home/recents, and visible-label clicking with password/security-screen protection.
-  - `actions/ShimiNotificationListenerService.kt`: Strictly opt-in latest notification reader.
-  - `overlay/OverlayManager.kt` & `overlay/FloatingAssistantView.kt`: Draggable `SYSTEM_ALERT_WINDOW` presence with configurable size & opacity.
-  - `service/BootReceiver.kt`: Honest Android 14+ boot notification (`Tap to resume microphone listening`).
+  - `service/ShimiForegroundService.kt`: Android 12–15 `FOREGROUND_SERVICE_MICROPHONE` service with persistent notification (`Listen` + `Stop`) that stays alive independently of the Activity/WebView.
+  - `engine/WakeWordEngine.kt`: Pluggable offline `WakeWordProvider` architecture (`SherpaOnnxKwsProvider`, `PorcupineWakeWordProvider`, and built-in `OfflineAcousticWakeProvider` running locally on 16kHz PCM with RMS + ZCR + syllable cadence — zero cloud passive audio, zero passive `SpeechRecognizer`).
+  - `engine/AssistantEngine.kt`: Strict two-stage audio pipeline:
+    `PASSIVE WakeWord -> pause -> LISTENING -> speak "Yes?" -> ACTIVE SpeechRecognizer -> TaskPlanner/IntentRouter -> TaskExecutor/AndroidActionExecutor -> TTS -> resume passive`.
+  - `tasks/TaskModels.kt`, `tasks/TaskPlanner.kt`, `tasks/TaskExecutor.kt`: Generic multi-step phone task engine (`OPEN_APP`, `WAIT_FOR_APP`, `FIND_UI`, `CLICK`, `TYPE`, `SCROLL`, `CONFIRM`, `VERIFY`) with mandatory confirmation gating before consequential actions (like sending messages or placing calls).
+  - `actions/AppLauncher.kt`: Dynamic `PackageManager` app discovery with multi-match disambiguation (`"I found 2 matching apps: ... Which one should I open?"`).
+  - `actions/AccessibilityActionExecutor.kt`: Strictly opt-in UI automation that refuses protected screens (`"I can't interact with this protected screen."`) and blocks password, OTP, PIN, CVV, banking, and biometric inputs.
+  - `overlay/FloatingAssistantView.kt` & `overlay/OverlayManager.kt`: Native Canvas floating robot dynamically rendering all 5 themes, 3 robot styles (`pod`, `aero`, `deskbot`), 6 accessories, and all expressive `RobotState` animations.
+  - `data/Models.kt` & `data/SettingsRepository.kt`: Versioned `AssistantConfig (schemaVersion = 2)` seeded on first launch directly from `BuildConfig.SHIMI_DEFAULT_*`.
+  - `service/BootReceiver.kt`: Honest Android 14+ boot notification (`"Your assistant is ready. Tap to resume background listening."`).
 
 ---
 
-## 2. How to Build & Run on an Android Phone
+## 2. Building a Personalized APK (GitHub Actions CI or Local Android Studio)
 
-1. Open the `/android` folder in **Android Studio Ladybug (2024.2+)** with **JDK 17** and **Android SDK 35**.
-2. Point `SHIMI_PWA_URL` and `SHIMI_API_BASE_URL` in `/android/gradle.properties` to your deployed Shimi server URL (or `http://10.0.2.2:3000` for Android Emulator / LAN IP `http://<your-mac-ip>:3000` for a physical phone).
-3. Run `./gradlew assembleDebug` (or click **Run** in Android Studio) to install the APK on an Android 12–15 device.
-4. In Shimi → **Permissions**, grant **Microphone**, **Notifications**, and optionally **Overlay**, **Accessibility**, **Notification Access**, **Contacts**, and **Battery Optimization exemption**.
-5. In Shimi → **Privacy**, switch **Shimi Background Assistant** ON and customize your wake word (e.g., your pet's name).
+### Option A: Automated Cloud APK Build via GitHub Actions (`.github/workflows/build-apk.yml`)
+1. Push this repository to GitHub.
+2. *(Optional for signed release APKs)* Add these four **GitHub Repository Secrets** (never commit keystores to git):
+   - `ANDROID_KEYSTORE_BASE64`
+   - `ANDROID_KEYSTORE_PASSWORD`
+   - `ANDROID_KEY_ALIAS`
+   - `ANDROID_KEY_PASSWORD`
+   *(If omitted, CI builds and publishes an explicitly labeled `-unsigned-debug.apk` for testing.)*
+3. Configure server-side environment variables on your deployed host (`.env` / Cloud Run secrets):
+   - `GITHUB_REPO=owner/repo`
+   - `GITHUB_TOKEN=<PAT with actions:write and contents:read>`
+   - `GITHUB_REF=main`
+4. Open the **Download APK** tab in Shimi, customize name/wake word/robot style/accessory/theme, and click **Build My APK**.
+
+### Option B: Local Build with Android Studio / Gradle (JDK 17 + Android SDK 35)
+```bash
+cd android
+./gradlew assembleDebug \
+  -PSHIMI_DEFAULT_NAME="Milo" \
+  -PSHIMI_DEFAULT_WAKE_WORD="Milo" \
+  -PSHIMI_DEFAULT_STYLE="aero" \
+  -PSHIMI_DEFAULT_ACCESSORY="headphones" \
+  -PSHIMI_DEFAULT_PERSONALITY="playful" \
+  -PSHIMI_DEFAULT_THEME="sage-emerald" \
+  -PSHIMI_VERSION_NAME="2.1.0" \
+  -PSHIMI_VERSION_CODE=20101
+```
+Output launcher label automatically updates to `"Milo"` via `manifestPlaceholders["appLabel"]`.
 
 ---
 
@@ -37,40 +61,9 @@ This directory contains the real, modular **Kotlin + Jetpack Compose / Material 
 
 | Feature | Android 12–13 | Android 14–15 | Shimi Behavior |
 |---|---|---|---|
-| Background wake-word + mic | Allowed with `foregroundServiceType="microphone"` started from foreground | Strictly requires foreground start & visible notification | `ShimiForegroundService` displays persistent notification with Pause/Stop |
+| Background wake-word + mic | `foregroundServiceType="microphone"` started from foreground | Strictly requires foreground start & visible notification | `ShimiForegroundService` keeps persistent notification with Listen/Stop |
 | Auto-start mic after reboot | Allowed on API < 34 if mic granted | **Blocked by OS** (`BOOT_COMPLETED` cannot start mic FGS) | `BootReceiver` posts honest tap-to-resume notification |
-| Floating robot over other apps | Allowed with `SYSTEM_ALERT_WINDOW` | Allowed with `SYSTEM_ALERT_WINDOW` (restricted settings on sideloaded APKs) | Falls back cleanly to notification controls if not granted |
-| Background Activity Launch (BAL) | Restricted unless overlay/visible | Tightened BAL enforcement | Uses overlay/notification/foreground context; reports honest error if OS blocks |
-| Screen scroll / tap / WhatsApp assist | Opt-in `AccessibilityService` | Opt-in `AccessibilityService` (Android 13+ Restricted Settings) | Explicit disclosure + confirmation gate before sending; blocks password/security screens |
+| Floating robot over other apps | Allowed with `SYSTEM_ALERT_WINDOW` | Allowed with `SYSTEM_ALERT_WINDOW` (Restricted Settings on sideloaded APKs) | Falls back cleanly to notification controls if not granted |
+| Multi-step app tasks (WhatsApp draft & confirm) | Opt-in `AccessibilityService` | Opt-in `AccessibilityService` (Android 13+ Restricted Settings) | Executes `TaskPlan` steps with confirmation gate before Send; blocks protected/password screens |
 | Direct Wi-Fi / Bluetooth silent toggle | Restricted on API 29+ | Restricted on API 29+ | Opens official `Settings.ACTION_WIFI_SETTINGS` / `ACTION_BLUETOOTH_SETTINGS` |
-| Passwords / Banking / Payments / OTP | Never automated | Never automated | Explicitly refused by `PrivacyManager` & `ShimiAccessibilityService` |
-
----
-
-## 4. 25-Point Physical Android Device Test Checklist
-
-1. Fresh install & onboarding saves custom assistant name and wake word locally.
-2. Grant Microphone + Notifications runtime permissions from Permissions tab.
-3. Enable **Shimi Background Assistant** master switch → persistent notification appears.
-4. Minimize app (Home button) → notification stays alive and wake word remains active.
-5. Swipe app away from Recents → `ShimiForegroundService` remains alive; reopening app reconnects to live state.
-6. Say custom wake word (e.g. pet's name) → Shimi wakes up, listens, and executes command.
-7. Enable **Airplane Mode / Offline** → say `"Turn on flashlight"` → torch turns on locally (zero Gemini call).
-8. Offline: `"Turn off flashlight"` → torch turns off locally.
-9. Offline: `"Volume up"` / `"Volume down"` / `"Mute"` → Android volume slider responds.
-10. Offline: `"Set a timer for 10 minutes"` → Clock timer launches.
-11. Offline: `"Set an alarm for 7 AM"` → Clock alarm launches.
-12. Offline: `"Open YouTube"` → `AppLauncher` launches YouTube dynamically.
-13. Offline: `"Open Wi-Fi settings"` → Android Wi-Fi settings open.
-14. Offline: `"Open Bluetooth settings"` → Android Bluetooth settings open.
-15. Offline: `"Open camera"` → Android Camera intent opens.
-16. Say `"Call Rahul"` → confirmation gate appears; Cancel aborts; Confirm opens dialer.
-17. Say `"Open WhatsApp and send a message to Alex saying hello"` → confirmation gate appears before opening draft.
-18. Enable Accessibility Service → `"Scroll down"`, `"Go back"`, `"Go home"`, `"Click Settings"` execute cleanly.
-19. Verify Accessibility Service refuses password / permission / biometric screens.
-20. Enable Notification Access → `"Read my latest notification"` reads latest non-ongoing notification aloud.
-21. Enable Overlay permission → draggable floating Shimi appears over other apps; Size & Opacity sliders update it live.
-22. Enable **Offline Only** AI mode → open-ended question returns honest offline fallback without network traffic.
-23. Re-enable **Auto (Offline-First + Gemini)** online → open-ended question answers via `/api/shimi/interpret` and speaks via TTS.
-24. Turn **Shimi Background Assistant** master switch OFF → wake word stops, mic releases, overlay hides, notification disappears.
-25. Reboot Android 14/15 device → `BootReceiver` posts honest `"Shimi is inactive after reboot — tap to resume"` notification.
+| Passwords / Banking / Payments / OTP | Never automated | Never automated | Explicitly blocked by `AccessibilityActionExecutor` & `PrivacyManager` |
